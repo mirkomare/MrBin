@@ -1,0 +1,29 @@
+# Build Arduino / PlatformIO
+build/
+.pio/
+*.elf
+*.hex
+*.bin
+*.map
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Backup locali
+*.bak
+*.tmp
+*.old
+*_backup*
+
+# Credenziali / segreti
+.env
+*.pem
+secrets.h
