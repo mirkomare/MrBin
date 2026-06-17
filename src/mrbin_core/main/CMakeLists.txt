@@ -1,0 +1,25 @@
+idf_component_register(
+    SRCS
+        "mrbin_core_main.cpp"
+        "CoreGPIO.cpp"
+        "CoreSettings.cpp"
+        "CoreCrypto.cpp"
+        "CoreSD.cpp"
+        "CoreRecorder.cpp"
+        "CoreAuth.cpp"
+        "CoreWeb.cpp"
+    INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_server
+        fatfs
+        sdmmc
+        mbedtls
+        driver
+        esp_timer
+        esp_capture
+        esp_capture_defaults
+)

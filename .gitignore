@@ -23,6 +23,10 @@ desktop.ini
 *.old
 *_backup*
 
+# Log installazione/toolchain locali
+*.log
+eim_config.toml
+
 # Credenziali / segreti
 .env
 *.pem

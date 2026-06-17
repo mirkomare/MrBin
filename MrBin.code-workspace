@@ -1,0 +1,32 @@
+{
+  "folders": [
+    {
+      "name": "MrBin CORE (ESP-IDF)",
+      "path": "src/mrbin_core"
+    },
+    {
+      "name": "MrBin (docs/scripts)",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "idf.espIdfPathWin": "C:\\esp\\v5.5\\esp-idf",
+    "idf.toolsPathWin": "C:\\Espressif\\tools",
+    "idf.pythonInstallPath": "C:\\Espressif\\tools\\python",
+    "idf.pythonBinPathWin": "C:\\Espressif\\tools\\python\\v5.5\\venv\\Scripts\\python.exe",
+    "idf.gitPath": "C:\\Program Files\\Git\\cmd\\git.exe",
+    "idf.port": "",
+    "idf.flashType": "UART",
+    "idf.saveScope": "workspace",
+    "idf.customExtraVars": {
+      "IDF_PATH": "C:\\esp\\v5.5\\esp-idf",
+      "IDF_TOOLS_PATH": "C:\\Espressif\\tools",
+      "IDF_PYTHON_ENV_PATH": "C:\\Espressif\\tools\\python\\v5.5\\venv"
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "espressif.esp-idf-extension"
+    ]
+  }
+}
