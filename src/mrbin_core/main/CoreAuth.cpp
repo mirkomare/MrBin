@@ -2,7 +2,13 @@
 
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_idf_version.h"
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+#define MBEDTLS_ALLOW_PRIVATE_ACCESS
+#include "mbedtls/private/sha256.h"
+#else
 #include "mbedtls/sha256.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 

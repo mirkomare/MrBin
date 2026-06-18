@@ -12,8 +12,8 @@ typedef struct {
     uint32_t core_id;           // 5 cifre
     uint8_t  aes_key[16];       // AES-128, creata al primo avvio
     bool     aes_key_valid;
-    char     wifi_ssid[33];
-    char     wifi_pass[65];
+    char     wifi_ssid[32];
+    char     wifi_pass[64];
     uint32_t d2_post_delay_ms;  // default 5000
 } core_settings_t;
 

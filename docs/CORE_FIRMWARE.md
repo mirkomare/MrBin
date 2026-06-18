@@ -10,12 +10,21 @@ Firmware per **Waveshare ESP32-P4-WIFI6-M** integrato nell'ecosistema BLEmax com
 | **Registrazione** | H.264 1920×1080 @ 30 fps → MP4 su SD, cifrato AES-128 |
 | **Naming file** | Dir `DDMMAAAA`, file `ID_DDMM_hhmmss.mp4` |
 | **Persistenza** | ID CORE 5 cifre + chiave AES-128 in NVS (create al primo avvio) |
-| **Web GUI** | Porta **1510**, login `mm` / `123456` (hash SHA-256 nello sketch) |
+| **Web GUI** | Porta **1510**, login `mm` / `123456` (hash SHA-256 in firmware) |
 | **Pagine web** | Impostazioni (ID, WiFi, delay D2, chiave, format SD) + elenco video con play decifrato |
 
 ## Build (ESP-IDF)
 
-Prerequisiti: [ESP-IDF 5.5+](https://docs.espressif.com/projects/esp-idf/en/latest/esp32p4/get-started/index.html), componenti `esp_capture` e `esp_muxer` (in `idf_component.yml`).
+Prerequisiti: [ESP-IDF 5.5.4](https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32p4/get-started/index.html) (ultima stabile v5.5.x).
+
+Script dalla root repo:
+
+```powershell
+cd C:\CURSOR\Mrbin
+.\scripts\build-core.ps1
+```
+
+Manuale:
 
 ```bash
 cd c:/CURSOR/Mrbin/src/mrbin_core
@@ -56,7 +65,8 @@ main/
   CoreSettings.*        # NVS: ID, chiave, WiFi, delay
   CoreSD.*              # mount, format, naming, spazio
   CoreCrypto.*          # AES-128-CTR
-  CoreRecorder.*        # esp_capture H264 + cifratura
+  CoreVideo.*           # esp_video / MIPI-CSI OV5647
+  CoreRecorder.*        # esp_capture H264 + MP4 + cifratura
   CoreWeb.*             # HTTP server + HTML
   CoreAuth.*            # login hash
 ```
@@ -64,5 +74,5 @@ main/
 ## Note
 
 - La registrazione usa `esp_capture` / encoder hardware H.264 del P4; verificare camera OV5647 collegata.
-- Pin SDIO SD e CSI seguono il pinout Waveshare (vedi wiki board).
+- Pin SDIO SD e CSI seguono il pinout Waveshare ESP32-P4-WIFI6-M (vedi `CoreConfig.h` e wiki board).
 - Per integrazione futura BLEmax: il CORE resta autonomo; eventuale UART/BLE in modalità config.

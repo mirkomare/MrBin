@@ -1,11 +1,27 @@
-# Firmware MrBin
+# Firmware MrBin — ESP-IDF
 
-Cartella per sketch Arduino (`.ino`) e librerie del progetto MrBin.
+Cartella dei **progetti ESP-IDF** per le schede MrBin.
 
-## Convenzione
+## Progetto attuale
 
-- Un sottocartella per sketch: `src/<nome_sketch>/<nome_sketch>.ino`
-- Header e driver condivisi nella stessa cartella dello sketch
-- Librerie riutilizzabili in sottocartelle dedicate se necessario
+| Progetto | Target | Descrizione |
+|----------|--------|-------------|
+| [`mrbin_core/`](mrbin_core/) | ESP32-P4 (Waveshare ESP32-P4-WIFI6-M) | CORE polling PIR/TPL5111, camera H.264, SD cifrata, web GUI |
 
-Creare il primo sketch quando il target hardware MrBin è definito.
+## Build
+
+```powershell
+cd C:\CURSOR\Mrbin
+.\scripts\build-core.ps1
+```
+
+Oppure manualmente:
+
+```bash
+cd src/mrbin_core
+idf.py set-target esp32p4
+idf.py build
+idf.py -p COMx flash monitor
+```
+
+Vedi [docs/CORE_FIRMWARE.md](../docs/CORE_FIRMWARE.md) e [docs/ESP-IDF_SETUP.md](../docs/ESP-IDF_SETUP.md).

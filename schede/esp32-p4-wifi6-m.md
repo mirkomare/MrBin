@@ -8,6 +8,8 @@
 | **Camera** | MIPI-CSI 2-lane (es. OV5647 Raspberry Pi) |
 | **Storage** | Slot TF SDIO 3.0 |
 | **Framework** | **ESP-IDF ≥ 5.5** (consigliato da Waveshare) |
+| **SDMMC** | CLK 43, CMD 44, D0–D3 = 39–42 |
+| **Camera SCCB** | SCL 8, SDA 7 (OV5647 MIPI-CSI) |
 
 ## GPIO MrBin (cablaggi PIR / TPL5111)
 
@@ -33,14 +35,9 @@ flowchart TD
 
 ## Sketch / firmware
 
-Progetto ESP-IDF: `src/mrbin_core/`
+Progetto ESP-IDF: [`src/mrbin_core/`](../src/mrbin_core/)
 
-```bash
-cd src/mrbin_core
-idf.py set-target esp32p4
-idf.py build
-idf.py -p COMx flash monitor
-```
+Pin SDMMC e camera definiti in `main/CoreConfig.h` (allineati a Waveshare ESP32-P4-WIFI6-M).
 
 ## Note hardware
 

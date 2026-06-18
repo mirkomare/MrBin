@@ -35,19 +35,17 @@ extern "C" void app_main(void) {
         return;
     }
 
-    // Prima configurazione SD (montaggio; formattazione solo da web GUI)
-    if (!core_sd_init()) {
-        ESP_LOGW(TAG, "SD non disponibile al boot — formattare da web GUI");
-    } else {
-        ESP_LOGI(TAG, "SD OK, spazio libero: %llu bytes", (unsigned long long)core_sd_free_bytes());
-    }
-
     setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
     tzset();
 
     if (core_gpio_is_d1_wake()) {
         ESP_LOGI(TAG, "D1 attivo (GPIO%d LOW) — modalità registrazione PIR", CORE_GPIO_D1_WAKE);
         disable_radio_for_recording();
+        if (!core_sd_init()) {
+            ESP_LOGW(TAG, "SD non disponibile — registrazione non possibile");
+        } else {
+            ESP_LOGI(TAG, "SD OK, spazio libero: %llu bytes", (unsigned long long)core_sd_free_bytes());
+        }
         core_recorder_run_session(&g_settings);
         // non ritorna: loop DONE
     }

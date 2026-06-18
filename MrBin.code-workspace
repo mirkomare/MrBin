@@ -2,7 +2,25 @@
   "folders": [
     {
       "name": "MrBin CORE (ESP-IDF)",
-      "path": "src/mrbin_core"
+      "path": "src/mrbin_core",
+      "settings": {
+        "idf.extensionActivationMode": "always",
+        "idf.enableStatusBar": true,
+        "idf.espIdfPathWin": "C:\\esp\\v6.0.1\\esp-idf",
+        "idf.toolsPathWin": "C:\\Espressif\\tools",
+        "idf.pythonInstallPath": "C:\\Espressif\\tools\\python",
+        "idf.pythonBinPathWin": "C:\\Espressif\\tools\\python\\v6.0.1\\venv\\Scripts\\python.exe",
+        "idf.gitPathWin": "C:\\Program Files\\Git\\cmd\\git.exe",
+        "idf.portWin": "detect",
+        "idf.flashType": "UART",
+        "idf.showOnboardingOnInit": false,
+        "idf.customExtraVars": {
+          "IDF_TARGET": "esp32p4",
+          "IDF_PATH": "C:\\esp\\v6.0.1\\esp-idf",
+          "IDF_TOOLS_PATH": "C:\\Espressif\\tools",
+          "IDF_PYTHON_ENV_PATH": "C:\\Espressif\\tools\\python\\v6.0.1\\venv"
+        }
+      }
     },
     {
       "name": "MrBin (docs/scripts)",
@@ -10,19 +28,84 @@
     }
   ],
   "settings": {
-    "idf.espIdfPathWin": "C:\\esp\\v5.5\\esp-idf",
-    "idf.toolsPathWin": "C:\\Espressif\\tools",
-    "idf.pythonInstallPath": "C:\\Espressif\\tools\\python",
-    "idf.pythonBinPathWin": "C:\\Espressif\\tools\\python\\v5.5\\venv\\Scripts\\python.exe",
-    "idf.gitPath": "C:\\Program Files\\Git\\cmd\\git.exe",
-    "idf.port": "",
-    "idf.flashType": "UART",
+    "idf.eimIdfJsonPath": "C:\\Espressif\\tools\\eim_idf.json",
     "idf.saveScope": "workspace",
-    "idf.customExtraVars": {
-      "IDF_PATH": "C:\\esp\\v5.5\\esp-idf",
-      "IDF_TOOLS_PATH": "C:\\Espressif\\tools",
-      "IDF_PYTHON_ENV_PATH": "C:\\Espressif\\tools\\python\\v5.5\\venv"
+    "terminal.integrated.defaultProfile.windows": "PowerShell",
+    "terminal.integrated.profiles.windows": {
+      "ESP-IDF PowerShell": {
+        "source": "PowerShell",
+        "args": [
+          "-NoExit",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "${workspaceFolder:MrBin (docs/scripts)}/scripts/activate-idf.ps1"
+        ],
+        "icon": "circuit-board"
+      }
     }
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "MrBin: Verifica workspace",
+        "type": "shell",
+        "command": "powershell",
+        "args": [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "${workspaceFolder:MrBin (docs/scripts)}/scripts/verify-workspace.ps1"
+        ],
+        "group": "test",
+        "presentation": {
+          "reveal": "always",
+          "panel": "shared"
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "MrBin: Build CORE",
+        "type": "shell",
+        "command": "powershell",
+        "args": [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "${workspaceFolder:MrBin (docs/scripts)}/scripts/build-core.ps1"
+        ],
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+        "presentation": {
+          "reveal": "always",
+          "panel": "shared"
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "MrBin: Clean + Build CORE",
+        "type": "shell",
+        "command": "powershell",
+        "args": [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          ". '${workspaceFolder:MrBin (docs/scripts)}/scripts/activate-idf.ps1'; Set-Location '${workspaceFolder:MrBin CORE (ESP-IDF)}'; idf.py fullclean; idf.py build"
+        ],
+        "group": "build",
+        "presentation": {
+          "reveal": "always",
+          "panel": "shared"
+        },
+        "problemMatcher": []
+      }
+    ]
   },
   "extensions": {
     "recommendations": [

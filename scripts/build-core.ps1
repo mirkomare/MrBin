@@ -11,12 +11,14 @@ $Project = Join-Path $Root "src\mrbin_core"
 
 Push-Location $Project
 try {
+    $IdfPy = Join-Path $env:IDF_PATH "tools\idf.py"
     if (-not (Test-Path "sdkconfig")) {
-        idf.py set-target esp32p4
+        python $IdfPy set-target esp32p4
     }
-    idf.py build
+    & (Join-Path $PSScriptRoot "patch-gmf-fft.ps1") -ProjectDir $Project
+    python $IdfPy build
     if ($Port) {
-        idf.py -p $Port flash monitor
+        python $IdfPy -p $Port flash monitor
     }
 }
 finally {

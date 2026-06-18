@@ -14,13 +14,19 @@ Il workspace apre due cartelle:
 - **MrBin CORE (ESP-IDF)** — progetto firmware (`src/mrbin_core`)
 - **MrBin (docs/scripts)** — documentazione e script
 
-## 2. Estensione
+## 2. Estensione e barra ESP-IDF
 
-L’estensione **Espressif IDF** (`espressif.esp-idf-extension`) è già installata in Cursor.
+L'estensione **Espressif IDF** (`espressif.esp-idf-extension`) va installata in Cursor (gia' consigliata dal workspace).
 
-Se non compare la barra ESP-IDF in basso:
-- `Ctrl+Shift+X` → cerca **ESP-IDF** → verifica che sia abilitata
-- Ricarica la finestra: `Ctrl+Shift+P` → **Developer: Reload Window**
+Se non compare la **barra ESP-IDF** in basso (chip, build, flash, monitor):
+
+1. Apri **`MrBin.code-workspace`** (non la sola cartella root)
+2. `Ctrl+Shift+P` → **Developer: Reload Window**
+3. Nel pannello **Explorer**, seleziona un file sotto **MrBin CORE (ESP-IDF)** (es. `main/mrbin_core_main.cpp`)
+4. Se ancora assente: `Ctrl+Shift+X` → **ESP-IDF** → verifica abilitata
+5. `Ctrl+Shift+P` → **ESP-IDF: Doctor Command** (deve leggere v5.5.4)
+
+La barra compare solo quando l'estensione e' attiva sulla cartella progetto `src/mrbin_core` (impostato con `idf.extensionActivationMode: always` nel workspace).
 
 ## 3. Collega ESP-IDF già installato (non reinstallare)
 
@@ -30,7 +36,7 @@ Se non compare la barra ESP-IDF in basso:
 ESP-IDF: Select Current ESP-IDF Version
 ```
 
-Seleziona **v5.5** (`C:\esp\v5.5\esp-idf`).
+Seleziona **v5.5.4** (`C:\esp\v5.5.4\esp-idf`).
 
 Se non compare in lista, usa:
 
@@ -79,8 +85,25 @@ e verifica che legga i path dal `settings.json` del workspace.
 
 | Setting | Valore |
 |---------|--------|
-| ESP-IDF | `C:\esp\v5.5\esp-idf` |
+| ESP-IDF | `C:\esp\v5.5.4\esp-idf` |
 | Tools | `C:\Espressif\tools` |
-| Python | `C:\Espressif\tools\python\v5.5\venv` |
+| Python | `C:\Espressif\tools\python\v5.5.4\venv` |
 
-Non serve rieseguire il wizard di installazione ESP-IDF nell’estensione: l’ambiente è già pronto via EIM.
+Non serve rieseguire il wizard di installazione ESP-IDF nell'estensione: l'ambiente è già pronto via EIM.
+
+## 8. Verifica rapida e build da terminale
+
+```powershell
+cd C:\CURSOR\Mrbin
+.\scripts\verify-workspace.ps1          # controlla path, Python, idf.py
+.\scripts\verify-workspace.ps1 -Build   # verifica + compila
+.\scripts\build-core.ps1                # solo build
+.\scripts\build-core.ps1 -Port COM5     # build + flash + monitor
+```
+
+Terminale integrato con ESP-IDF già attivo: profilo **ESP-IDF PowerShell** (menu ▼ del terminale).
+
+Task Cursor/VS Code (`Ctrl+Shift+P` → **Tasks: Run Task**):
+- **MrBin: Verifica workspace**
+- **MrBin: Build CORE** (default build)
+- **MrBin: Clean + Build CORE**

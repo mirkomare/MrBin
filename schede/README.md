@@ -1,27 +1,21 @@
 # Schede MrBin
 
-Documentazione e configurazione delle **schede Arduino / PCB** usate nel progetto MrBin.
+Documentazione hardware e note di build per le **schede MrBin**.
 
-## Contenuto previsto
+## Schede documentate
 
-Per ogni scheda, aggiungere un file (es. `scheda-principale.md`) con:
+| File | Scheda | Framework |
+|------|--------|-----------|
+| [esp32-p4-wifi6-m.md](esp32-p4-wifi6-m.md) | Waveshare ESP32-P4-WIFI6-M (CORE) | **ESP-IDF ≥ 5.5** |
+
+## Contenuto previsto per ogni scheda
 
 | Campo | Descrizione |
 |-------|-------------|
-| Nome scheda | Nome in Arduino IDE (Board Manager) |
-| MCU | Modello e package |
-| Pinout | Mappatura GPIO rilevante |
-| Periferiche | Display, sensori, alimentazione |
-| Note build | Core, frequenza, partizioni, flag compile |
+| Nome scheda | Prodotto / SKU |
+| MCU | Modello e periferiche |
+| Pinout | GPIO rilevanti (PIR, TPL, SD, camera) |
+| Firmware | Path progetto ESP-IDF |
+| Note build | Target, partition, componenti |
 
-## Esempio
-
-```markdown
-# MrBin — scheda principale
-
-- **Arduino IDE**: Seeed XIAO MG24
-- **Core**: Silicon Labs Arduino
-- **Note**: ...
-```
-
-Aggiornare questa cartella ad ogni modifica hardware o cambio target.
+Aggiornare questa cartella ad ogni modifica hardware o cambio board.

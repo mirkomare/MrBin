@@ -1,8 +1,10 @@
-# MrBin
+# MrBin mirko
+
+**Versione:** 0.1.0 stable — vedi [CHANGELOG.md](CHANGELOG.md) e [VERSION](VERSION).
 
 Progetto firmware e documentazione per le **schede dedicate MrBin** (CORE su Waveshare ESP32-P4-WIFI6-M).
 
-Repository separato da [BLEmax-M](https://github.com/mirkomare/BLEmax-M): ogni modifica a hardware, sketch o configurazione board MrBin va aggiornata **qui**.
+Repository separato da [BLEmax-M](https://github.com/mirkomare/BLEmax-M): ogni modifica a hardware, firmware o configurazione board MrBin va aggiornata **qui**.
 
 ## Primo firmware: MrBin CORE
 
@@ -17,7 +19,24 @@ Device polling alimentato da **TPL5111** + **PIR**:
 | [docs/CURSOR_ESP_IDF.md](docs/CURSOR_ESP_IDF.md) | **Cursor + estensione Espressif IDF** |
 | [schede/esp32-p4-wifi6-m.md](schede/esp32-p4-wifi6-m.md) | Pinout e scheda Waveshare |
 
-### Build rapida
+### Workspace Cursor
+
+Apri **`MrBin.code-workspace`** (File → Open Workspace from File). Vedi [docs/CURSOR_ESP_IDF.md](docs/CURSOR_ESP_IDF.md).
+
+Verifica ambiente e build:
+
+```powershell
+cd C:\CURSOR\Mrbin
+.\scripts\verify-workspace.ps1
+.\scripts\verify-workspace.ps1 -Build
+```
+
+### Build rapida (ESP-IDF)
+
+```powershell
+cd C:\CURSOR\Mrbin
+.\scripts\build-core.ps1
+```
 
 ```bash
 cd src/mrbin_core
