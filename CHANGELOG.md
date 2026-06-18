@@ -4,8 +4,9 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 ## [0.1.0] - 2026-06-18 — stable
 
-**Commit:** `3c5ee4e52dc04e3131c4f887a0b5925d12a3bd75`  
+**Commit:** `5f9ffd0b103f632cb95317fa9fa0d139b13ac1f5`  
 **Data/ora release:** 2026-06-18 02:12:27 +0200  
+**Tag:** `v0.1.0`  
 **Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)
 
 ### Aggiunto
