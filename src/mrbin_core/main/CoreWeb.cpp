@@ -351,15 +351,34 @@ static esp_err_t handle_videos_get(httpd_req_t *req) {
     if (root) {
         struct dirent *day;
         while ((day = readdir(root)) != nullptr && off < sizeof(body) - 200) {
-            if (day->d_type != DT_DIR) continue;
-            if (strcmp(day->d_name, ".") == 0 || strcmp(day->d_name, "..") == 0) continue;
+            if (day->d_type != DT_DIR && day->d_type != DT_UNKNOWN) {
+                continue;
+            }
+            if (strcmp(day->d_name, ".") == 0 || strcmp(day->d_name, "..") == 0) {
+                continue;
+            }
             char daypath[48];
             snprintf(daypath, sizeof(daypath), "%s/%.8s", CORE_SD_MOUNT_POINT, day->d_name);
+            struct stat day_st;
+            if (stat(daypath, &day_st) != 0 || !S_ISDIR(day_st.st_mode)) {
+                continue;
+            }
             DIR *subdir = opendir(daypath);
             if (!subdir) continue;
             struct dirent *f;
             while ((f = readdir(subdir)) != nullptr && off < sizeof(body) - 200) {
-                if (f->d_type != DT_REG) continue;
+                if (f->d_type != DT_REG && f->d_type != DT_UNKNOWN) {
+                    continue;
+                }
+                if (strstr(f->d_name, ".tmp")) {
+                    continue;
+                }
+                char fpath[128];
+                snprintf(fpath, sizeof(fpath), "%s/%.64s", daypath, f->d_name);
+                struct stat fst;
+                if (stat(fpath, &fst) != 0 || !S_ISREG(fst.st_mode)) {
+                    continue;
+                }
                 off += snprintf(body + off, sizeof(body) - off,
                     "<li><a href='/play?f=%s/%s'>%s/%s</a></li>",
                     day->d_name, f->d_name, day->d_name, f->d_name);

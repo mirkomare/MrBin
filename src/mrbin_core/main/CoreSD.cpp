@@ -146,9 +146,21 @@ static bool delete_oldest_day_dir(void) {
     char oldest[32] = {0};
     struct dirent *ent;
     while ((ent = readdir(dir)) != nullptr) {
-        if (ent->d_type != DT_DIR) continue;
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-        if (strlen(ent->d_name) != 8) continue;
+        if (ent->d_type != DT_DIR && ent->d_type != DT_UNKNOWN) {
+            continue;
+        }
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        if (strlen(ent->d_name) != 8) {
+            continue;
+        }
+        char path[48];
+        snprintf(path, sizeof(path), "%s/%.8s", CORE_SD_MOUNT_POINT, ent->d_name);
+        struct stat dst;
+        if (stat(path, &dst) != 0 || !S_ISDIR(dst.st_mode)) {
+            continue;
+        }
         if (oldest[0] == 0 || strcmp(ent->d_name, oldest) < 0) {
             strncpy(oldest, ent->d_name, sizeof(oldest) - 1);
         }
@@ -164,9 +176,15 @@ static bool delete_oldest_day_dir(void) {
     if (subdir) {
         struct dirent *f;
         while ((f = readdir(subdir)) != nullptr) {
-            if (f->d_type != DT_REG) continue;
+            if (f->d_type != DT_REG && f->d_type != DT_UNKNOWN) {
+                continue;
+            }
             char fpath[128];
             snprintf(fpath, sizeof(fpath), "%s/%.64s", path, f->d_name);
+            struct stat fst;
+            if (stat(fpath, &fst) != 0 || !S_ISREG(fst.st_mode)) {
+                continue;
+            }
             remove(fpath);
         }
         closedir(subdir);

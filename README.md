@@ -1,6 +1,6 @@
 # MrBin mirko
 
-**Versione:** 0.1.0 stable — vedi [CHANGELOG.md](CHANGELOG.md) e [VERSION](VERSION).
+**Versione:** 0.1.1 — vedi [CHANGELOG.md](CHANGELOG.md) e [VERSION](VERSION).
 
 Progetto firmware e documentazione per le **schede dedicate MrBin** (CORE su Waveshare ESP32-P4-WIFI6-M).
 

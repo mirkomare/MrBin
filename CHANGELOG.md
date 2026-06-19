@@ -2,6 +2,28 @@
 
 Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
+## [0.1.1] - 2026-06-18 — bugfix registrazione / DONE / SD
+
+**Commit:** `PLACEHOLDER`  
+**Data/ora release:** PLACEHOLDER  
+**Tag:** `v0.1.1`  
+**Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)
+
+### Corretto
+
+- **DONE (GPIO23) sempre emesso** dopo ricezione **D2 LOW (GPIO21)**, anche se registrazione o cifratura falliscono — necessario per spegnimento **TPL5111** e consumo batteria.
+- **Attesa D2 obbligatoria:** la sessione PIR non esce più prima di D2 se camera/`esp_capture`/SD falliscono all'avvio (prima usciva subito → niente DONE).
+- **`CoreRecorder`:** refactor `recorder_capture_start/stop`; validazione MP4 temporaneo (min 1 KB); log `errno` su apertura/scrittura file; riepilogo finale `reg/mp4/cifrato`.
+- **`CoreGPIO`:** `core_gpio_log_inputs()` e `core_gpio_hold_tpl_done()` (delay configurabile + DONE HIGH permanente).
+- **`mrbin_core_main`:** fallback DONE se la sessione ritorna; niente passaggio silenzioso a Web GUI dopo boot con **D1 attivo**.
+- **Elenco file SD (FAT):** `CoreWeb` e `CoreSD` usano `stat()` oltre a `d_type` — su FAT `DT_UNKNOWN` nascondeva file e directory esistenti nella Web GUI.
+- **Cifratura:** rifiuto MP4 temporaneo assente o troppo piccolo prima di AES-128-CTR; log errori scrittura payload.
+
+### Note
+
+- I file registrati in modalità PIR senza NTP restano in cartelle data **1970** (`/sdcard/DDMMYYYY/` con RTC non sincronizzato) — comportamento invariato, ora visibili in GUI se presenti.
+- Build consigliata: ESP-IDF **v5.5.4** (`src/mrbin_core/.vscode/settings.json`).
+
 ## [0.1.0] - 2026-06-18 — stable
 
 **Commit:** `5f9ffd0b103f632cb95317fa9fa0d139b13ac1f5`  
@@ -39,4 +61,5 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 - **Registrazione:** H264 HW identico a `CORE_VIDEO_*` in `CoreConfig.h`.
 - **Build:** `idf.py -p COM15 flash monitor` con ESP-IDF **v5.5.4** (non 6.x per compatibilità chip rev e componenti).
 
+[0.1.1]: https://github.com/mirkomare/MrBin/releases/tag/v0.1.1
 [0.1.0]: https://github.com/mirkomare/MrBin/releases/tag/v0.1.0

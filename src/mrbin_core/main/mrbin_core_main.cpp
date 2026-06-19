@@ -42,12 +42,12 @@ extern "C" void app_main(void) {
         ESP_LOGI(TAG, "D1 attivo (GPIO%d LOW) — modalità registrazione PIR", CORE_GPIO_D1_WAKE);
         disable_radio_for_recording();
         if (!core_sd_init()) {
-            ESP_LOGW(TAG, "SD non disponibile — registrazione non possibile");
+            ESP_LOGW(TAG, "SD non disponibile al boot — retry in sessione");
         } else {
             ESP_LOGI(TAG, "SD OK, spazio libero: %llu bytes", (unsigned long long)core_sd_free_bytes());
         }
         core_recorder_run_session(&g_settings);
-        // non ritorna: loop DONE
+        core_gpio_hold_tpl_done(g_settings.d2_post_delay_ms);
     }
 
     ESP_LOGI(TAG, "Boot senza D1 — modalità configurazione (Web GUI :%d)", CORE_WEB_PORT);

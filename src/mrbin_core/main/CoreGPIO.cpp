@@ -3,6 +3,8 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "core_gpio";
 
@@ -46,4 +48,22 @@ bool core_gpio_is_d2_end(void) {
 
 void core_gpio_signal_tpl_done(void) {
     gpio_set_level(CORE_GPIO_TPL_DONE, 1);
+}
+
+void core_gpio_log_inputs(void) {
+    ESP_LOGI(TAG, "GPIO D1(%d)=%d D2(%d)=%d DONE(%d)=%d (0=LOW)",
+             CORE_GPIO_D1_WAKE, gpio_get_level(CORE_GPIO_D1_WAKE),
+             CORE_GPIO_D2_END, gpio_get_level(CORE_GPIO_D2_END),
+             CORE_GPIO_TPL_DONE, gpio_get_level(CORE_GPIO_TPL_DONE));
+}
+
+void core_gpio_hold_tpl_done(uint32_t delay_ms) {
+    ESP_LOGI(TAG, "Attendo %lu ms prima del DONE", (unsigned long)delay_ms);
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    core_gpio_signal_tpl_done();
+    ESP_LOGI(TAG, "DONE inviato (GPIO%d HIGH) — spegnimento TPL", CORE_GPIO_TPL_DONE);
+    while (true) {
+        core_gpio_signal_tpl_done();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }
