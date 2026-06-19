@@ -4,8 +4,8 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 ## [0.1.1] - 2026-06-18 — bugfix registrazione / DONE / SD
 
-**Commit:** `PLACEHOLDER`  
-**Data/ora release:** PLACEHOLDER  
+**Commit:** `5c579ba693d2290bf401bae73da91209435404ca`  
+**Data/ora release:** 2026-06-19 15:04:49 +0200  
 **Tag:** `v0.1.1`  
 **Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)
 
