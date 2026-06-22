@@ -25,6 +25,10 @@ static bool s_boot_error_page = false;
 static core_gpio_boot_snapshot_t s_boot_error_snap = {};
 static bool s_wifi_events_registered = false;
 
+static const char *gpio_level_label(int level) {
+    return level ? "HIGH" : "LOW";
+}
+
 static bool is_authed(httpd_req_t *req) {
     char cookie[128];
     if (httpd_req_get_hdr_value_str(req, "Cookie", cookie, sizeof(cookie)) != ESP_OK) {
@@ -176,13 +180,13 @@ static esp_err_t handle_root(httpd_req_t *req) {
             "input{display:block;width:100%%;margin:8px 0;padding:8px}button{padding:10px 16px}"
             ".boot-err{color:#c00;font-weight:bold;font-size:1.05em;margin:0 0 20px;padding:12px;"
             "border:2px solid #c00;background:#fff0f0}</style></head><body><h2>MrBin CORE</h2>"
-            "<p class=\"boot-err\">ERRORE BOOT PIN non riconosciuto, D1=%d D2=%d MODE=%d</p>"
+            "<p class=\"boot-err\">ERRORE BOOT PIN non riconosciuto, D1=%s D2=%s MODE=%s</p>"
             "<form method=\"POST\" action=\"/login\"><label>User</label><input name=\"user\" required>"
             "<label>Password</label><input name=\"pass\" type=\"password\" required>"
             "<button type=\"submit\">Login</button></form></body></html>",
-            s_boot_error_snap.d1_level,
-            s_boot_error_snap.d2_level,
-            s_boot_error_snap.mode_level);
+            gpio_level_label(s_boot_error_snap.d1_level),
+            gpio_level_label(s_boot_error_snap.d2_level),
+            gpio_level_label(s_boot_error_snap.mode_level));
     } else {
         strncpy(body, LOGIN_HTML, sizeof(body) - 1);
         body[sizeof(body) - 1] = 0;

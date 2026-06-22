@@ -2,6 +2,25 @@
 
 Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
+## [0.3.0] - 2026-06-23 — Stable: pagina errore boot con livelli GPIO HIGH/LOW
+
+**Commit:** `PLACEHOLDER`  
+**Data/ora release:** PLACEHOLDER_DATETIME  
+**Tag:** `v0.3.0`  
+**Stato:** **Stable** (minor) — prima release stable dopo v0.2.1-beta; migliora la leggibilità diagnostica della pagina errore boot.  
+**Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
+**Versione firmware:** `src/mrbin_core/VERSION` → `0.3.0`
+
+### Modificato
+
+#### `CoreWeb.cpp` — pagina errore boot
+- Banner errore boot: valori snapshot **D1**, **D2**, **MODE** mostrati come **`HIGH`** / **`LOW`** invece di `0` / `1`.
+- Helper locale `gpio_level_label()` per etichettare i livelli GPIO al boot.
+
+### Note
+
+- Comportamento firmware invariato rispetto a v0.2.1-beta; solo presentazione Web della diagnostica GPIO.
+
 ## [0.2.1-beta] - 2026-06-22 — Beta: LED WiFi/AP/errore, AP errore boot, snapshot GPIO
 
 **Commit:** `6fdcda634c1eeeea70710706b069b0c9be5f3284`  
@@ -237,6 +256,7 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 - **Registrazione:** H264 HW identico a `CORE_VIDEO_*` in `CoreConfig.h`.
 - **Build:** `idf.py -p COM15 flash monitor` con ESP-IDF **v5.5.4** (non 6.x per compatibilità chip rev e componenti).
 
+[0.3.0]: https://github.com/mirkomare/MrBin/releases/tag/v0.3.0
 [0.2.1-beta]: https://github.com/mirkomare/MrBin/releases/tag/v0.2.1-beta
 [0.2.0-beta]: https://github.com/mirkomare/MrBin/releases/tag/v0.2.0-beta
 [0.1.1]: https://github.com/mirkomare/MrBin/releases/tag/v0.1.1
