@@ -4,8 +4,8 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 ## [0.2.0-beta] - 2026-06-22 — Beta: GPIO29 config, fast-boot PSRAM, Web condizionale, LED errore
 
-**Commit:** `PLACEHOLDER`  
-**Data/ora release:** 2026-06-22 13:18:37 +0200  
+**Commit:** `01340dfc65576e8e8849c037a8653e7aeb00b477`  
+**Data/ora release:** 2026-06-22 13:19:12 +0200  
 **Tag:** `v0.2.0-beta`  
 **Stato:** **Beta** — funzionalità nuove, da validare su hardware reale (registrazione PSRAM→SD, interruttore GPIO29, LED GPIO52).  
 **Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
