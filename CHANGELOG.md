@@ -4,8 +4,8 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 ## [0.3.0] - 2026-06-23 — Stable: pagina errore boot con livelli GPIO HIGH/LOW
 
-**Commit:** `PLACEHOLDER`  
-**Data/ora release:** PLACEHOLDER_DATETIME  
+**Commit:** `6496842c9dd7018ec77f247b9570d52807a30638`  
+**Data/ora release:** 2026-06-23 01:35:13 +0200  
 **Tag:** `v0.3.0`  
 **Stato:** **Stable** (minor) — prima release stable dopo v0.2.1-beta; migliora la leggibilità diagnostica della pagina errore boot.  
 **Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
