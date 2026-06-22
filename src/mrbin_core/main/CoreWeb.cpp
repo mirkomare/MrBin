@@ -488,48 +488,15 @@ static bool wifi_start_sta(const core_settings_t *s) {
     return true;
 }
 
-static bool wifi_start_ap(const core_settings_t *s) {
-    if (!s || s_wifi_radio_started) return s_wifi_radio_started;
-    if (!wifi_init_driver()) return false;
-
-    esp_netif_create_default_wifi_ap();
-
-    char ap_ssid[32];
-    snprintf(ap_ssid, sizeof(ap_ssid), "MrBin-%05lu", (unsigned long)s->core_id);
-
-    wifi_config_t wcfg = {};
-    snprintf((char *)wcfg.ap.ssid, sizeof(wcfg.ap.ssid), "%s", ap_ssid);
-    wcfg.ap.ssid_len = (uint8_t)strlen(ap_ssid);
-    wcfg.ap.channel = 1;
-    wcfg.ap.max_connection = 4;
-    snprintf((char *)wcfg.ap.password, sizeof(wcfg.ap.password), "12345678");
-    wcfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
-
-    if (init_once(esp_wifi_set_mode(WIFI_MODE_AP), "esp_wifi_set_mode") != ESP_OK) return false;
-    if (init_once(esp_wifi_set_config(WIFI_IF_AP, &wcfg), "esp_wifi_set_config") != ESP_OK) {
-        return false;
-    }
-    if (init_once(esp_wifi_start(), "esp_wifi_start") != ESP_OK) return false;
-    s_wifi_radio_started = true;
-    ESP_LOGI(TAG, "WiFi AP avviato: %s (pass 12345678)", ap_ssid);
-    return true;
-}
-
-static bool wifi_start(const core_settings_t *s) {
-    if (s && s->wifi_ssid[0] != 0) {
-        return wifi_start_sta(s);
-    }
-    return wifi_start_ap(s);
-}
-
 bool core_web_start(core_settings_t *settings) {
     s_settings = settings;
-    if (!ensure_network_stack()) {
-        ESP_LOGE(TAG, "Stack rete non inizializzato");
+    if (!settings || settings->wifi_ssid[0] == 0) {
+        ESP_LOGI(TAG, "WiFi non configurato (SSID vuoto) — Web GUI non avviata");
         return false;
     }
-    if (!wifi_start(settings)) {
-        ESP_LOGW(TAG, "WiFi non avviato");
+    if (!wifi_start_sta(settings)) {
+        ESP_LOGW(TAG, "WiFi non avviato — Web GUI non avviata");
+        return false;
     }
     if (!core_sd_is_mounted() && !core_sd_init()) {
         ESP_LOGW(TAG, "SD non montata — pagina video limitata");

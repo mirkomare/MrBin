@@ -7,6 +7,12 @@
 #define CORE_GPIO_D1_WAKE   GPIO_NUM_28   // LOW = accensione per movimento (D1)
 #define CORE_GPIO_D2_END    GPIO_NUM_21   // LOW = fine movimento (D2)
 #define CORE_GPIO_TPL_DONE  GPIO_NUM_23   // HIGH = DONE verso TPL5111 (spegnimento)
+// HIGH al boot = config (WiFi/Web); LOW = PIR. Interruttore GND / 3V3 (mai >3,3 V sul pin)
+#define CORE_GPIO_MODE_CFG  GPIO_NUM_29
+// LED errore boot PIR senza D1 — header 2x20 alto-sx, HIGH=on, pull-down esterno
+#define CORE_GPIO_STATUS_LED      GPIO_NUM_52
+#define CORE_STATUS_LED_ON_LEVEL  1
+#define CORE_STATUS_LED_BLINK_MS  100
 
 // --- Rete / Web ---
 #define CORE_WEB_PORT       1510
@@ -54,6 +60,12 @@
 
 // --- SD spazio minimo per nuova registrazione (bytes) ---
 #define CORE_SD_MIN_FREE_BYTES  (50ULL * 1024ULL * 1024ULL)
+
+// --- Registrazione fast-boot (buffer PSRAM pre-SD + mux MP4 su SD) ---
+#define CORE_H264_PSRAM_MAX_BYTES   (12U * 1024U * 1024U)   // ~12 MB in PSRAM
+#define CORE_SD_PREP_TASK_STACK     4096
+#define CORE_SD_PREP_TASK_PRIO      3
+#define CORE_REC_ACQUIRE_TIMEOUT_MS 100
 
 // Credenziali web (user mm / pass 123456) — hash SHA-256 di "mm:123456"
 // Generato offline; verifica in CoreAuth.cpp

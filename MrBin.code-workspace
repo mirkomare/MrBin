@@ -6,19 +6,20 @@
       "settings": {
         "idf.extensionActivationMode": "always",
         "idf.enableStatusBar": true,
-        "idf.espIdfPathWin": "C:\\esp\\v6.0.1\\esp-idf",
+        "idf.espIdfPathWin": "C:\\esp\\v5.5.4\\esp-idf",
         "idf.toolsPathWin": "C:\\Espressif\\tools",
         "idf.pythonInstallPath": "C:\\Espressif\\tools\\python",
-        "idf.pythonBinPathWin": "C:\\Espressif\\tools\\python\\v6.0.1\\venv\\Scripts\\python.exe",
+        "idf.pythonBinPathWin": "C:\\Espressif\\tools\\python\\v5.5.4\\venv\\Scripts\\python.exe",
         "idf.gitPathWin": "C:\\Program Files\\Git\\cmd\\git.exe",
         "idf.portWin": "detect",
         "idf.flashType": "UART",
         "idf.showOnboardingOnInit": false,
+        "idf.currentSetup": "C:\\esp\\v5.5.4\\esp-idf",
         "idf.customExtraVars": {
           "IDF_TARGET": "esp32p4",
-          "IDF_PATH": "C:\\esp\\v6.0.1\\esp-idf",
+          "IDF_PATH": "C:\\esp\\v5.5.4\\esp-idf",
           "IDF_TOOLS_PATH": "C:\\Espressif\\tools",
-          "IDF_PYTHON_ENV_PATH": "C:\\Espressif\\tools\\python\\v6.0.1\\venv"
+          "IDF_PYTHON_ENV_PATH": "C:\\Espressif\\tools\\python\\v5.5.4\\venv"
         }
       }
     },

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-// Registra fino a ricezione D2, poi cifra il file MP4
+// Registra fino a D2: capture immediato in PSRAM, SD in parallelo, mux MP4 su SD
 bool core_recorder_run_session(const core_settings_t *settings);
 
 #ifdef __cplusplus

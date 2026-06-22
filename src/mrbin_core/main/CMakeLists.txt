@@ -10,6 +10,7 @@ idf_component_register(
         "CoreAuth.cpp"
         "CoreWeb.cpp"
         "CoreLive.cpp"
+        "CoreH264Buffer.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
