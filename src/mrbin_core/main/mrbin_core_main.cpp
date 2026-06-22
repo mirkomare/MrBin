@@ -2,6 +2,7 @@
 #include "CoreGPIO.h"
 #include "CoreRecorder.h"
 #include "CoreSettings.h"
+#include "CoreStatusLed.h"
 #include "CoreWeb.h"
 
 #include "esp_log.h"
@@ -18,11 +19,18 @@ static void disable_radio_for_recording(void) {
 
 static void run_config_mode(void) {
     ESP_LOGI(TAG, "GPIO%d HIGH — modalità configurazione (WiFi/Web)", CORE_GPIO_MODE_CFG);
-    if (core_web_start(&g_settings)) {
+
+    bool web_ok = false;
+    if (g_settings.wifi_ssid[0] != 0) {
+        web_ok = core_web_start(&g_settings, CORE_WEB_WIFI_STA, nullptr);
+    } else {
+        web_ok = core_web_start(&g_settings, CORE_WEB_WIFI_AP, nullptr);
+    }
+
+    if (web_ok) {
         ESP_LOGI(TAG, "Web GUI attiva — attendo GPIO%d LOW per spegnimento", CORE_GPIO_MODE_CFG);
     } else {
-        ESP_LOGW(TAG, "Web GUI non avviata (WiFi non configurato?) — attendo GPIO%d LOW",
-                 CORE_GPIO_MODE_CFG);
+        ESP_LOGW(TAG, "Web GUI non avviata — attendo GPIO%d LOW", CORE_GPIO_MODE_CFG);
     }
 
     while (core_gpio_is_mode_config()) {
@@ -36,8 +44,19 @@ static void run_config_mode(void) {
 
 static void run_pir_mode(void) {
     if (!core_gpio_is_d1_wake()) {
-        ESP_LOGW(TAG, "PIR senza D1 attivo — errore boot, lampeggio LED");
-        core_gpio_blink_error_forever();
+        core_gpio_boot_snapshot_t snap;
+        core_gpio_get_boot_snapshot(&snap);
+        ESP_LOGW(TAG, "PIR senza D1 — errore boot D1=%d D2=%d MODE=%d, AP+LED errore",
+                 snap.d1_level, snap.d2_level, snap.mode_level);
+        if (core_web_start(&g_settings, CORE_WEB_WIFI_AP_BOOT_ERROR, &snap)) {
+            ESP_LOGI(TAG, "AP errore boot attivo — Web :%d", CORE_WEB_PORT);
+        } else {
+            ESP_LOGE(TAG, "AP errore boot fallito — solo LED errore");
+            core_status_led_set_mode(CORE_LED_ERROR);
+        }
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
     }
 
     ESP_LOGI(TAG, "D1 attivo (GPIO%d LOW) — registrazione PIR", CORE_GPIO_D1_WAKE);
@@ -60,6 +79,9 @@ extern "C" void app_main(void) {
         ESP_LOGE(TAG, "GPIO init fallita");
         return;
     }
+
+    core_gpio_save_boot_snapshot();
+    core_status_led_init();
 
     setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
     tzset();

@@ -4,6 +4,7 @@
 #include "CoreCrypto.h"
 #include "CoreLive.h"
 #include "CoreSD.h"
+#include "CoreStatusLed.h"
 #include "CoreVideo.h"
 
 #include "dirent.h"
@@ -20,6 +21,9 @@
 static const char *TAG = "core_web";
 static httpd_handle_t s_server = nullptr;
 static core_settings_t *s_settings = nullptr;
+static bool s_boot_error_page = false;
+static core_gpio_boot_snapshot_t s_boot_error_snap = {};
+static bool s_wifi_events_registered = false;
 
 static bool is_authed(httpd_req_t *req) {
     char cookie[128];
@@ -163,8 +167,29 @@ static esp_err_t handle_live_stream(httpd_req_t *req) {
 
 static esp_err_t handle_root(httpd_req_t *req) {
     if (is_authed(req)) return send_redirect(req, "/settings");
+
+    char body[768];
+    if (s_boot_error_page) {
+        snprintf(body, sizeof(body),
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>MrBin CORE</title>"
+            "<style>body{font-family:sans-serif;max-width:520px;margin:40px auto}"
+            "input{display:block;width:100%%;margin:8px 0;padding:8px}button{padding:10px 16px}"
+            ".boot-err{color:#c00;font-weight:bold;font-size:1.05em;margin:0 0 20px;padding:12px;"
+            "border:2px solid #c00;background:#fff0f0}</style></head><body><h2>MrBin CORE</h2>"
+            "<p class=\"boot-err\">ERRORE BOOT PIN non riconosciuto, D1=%d D2=%d MODE=%d</p>"
+            "<form method=\"POST\" action=\"/login\"><label>User</label><input name=\"user\" required>"
+            "<label>Password</label><input name=\"pass\" type=\"password\" required>"
+            "<button type=\"submit\">Login</button></form></body></html>",
+            s_boot_error_snap.d1_level,
+            s_boot_error_snap.d2_level,
+            s_boot_error_snap.mode_level);
+    } else {
+        strncpy(body, LOGIN_HTML, sizeof(body) - 1);
+        body[sizeof(body) - 1] = 0;
+    }
+
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, LOGIN_HTML, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t handle_login(httpd_req_t *req) {
@@ -445,6 +470,14 @@ static esp_err_t handle_play(httpd_req_t *req) {
 
 static bool s_wifi_driver_started = false;
 static bool s_wifi_radio_started = false;
+static core_web_wifi_mode_t s_active_wifi_mode = CORE_WEB_WIFI_STA;
+
+static void wifi_ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
+    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        ESP_LOGI(TAG, "WiFi STA connesso — lampeggio LED x3");
+        core_status_led_notify_sta_connected();
+    }
+}
 
 static esp_err_t init_once(esp_err_t err, const char *what) {
     if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) return ESP_OK;
@@ -453,8 +486,20 @@ static esp_err_t init_once(esp_err_t err, const char *what) {
 }
 
 static bool ensure_network_stack(void) {
-    return init_once(esp_netif_init(), "esp_netif_init") == ESP_OK &&
-           init_once(esp_event_loop_create_default(), "esp_event_loop_create_default") == ESP_OK;
+    if (init_once(esp_netif_init(), "esp_netif_init") != ESP_OK ||
+        init_once(esp_event_loop_create_default(), "esp_event_loop_create_default") != ESP_OK) {
+        return false;
+    }
+    if (!s_wifi_events_registered) {
+        esp_err_t err = esp_event_handler_instance_register(
+            IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_ip_event_handler, nullptr, nullptr);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "registrazione IP_EVENT fallita: %s", esp_err_to_name(err));
+            return false;
+        }
+        s_wifi_events_registered = true;
+    }
+    return true;
 }
 
 static bool wifi_init_driver(void) {
@@ -469,7 +514,7 @@ static bool wifi_init_driver(void) {
 
 static bool wifi_start_sta(const core_settings_t *s) {
     if (!s || s->wifi_ssid[0] == 0) return false;
-    if (s_wifi_radio_started) return true;
+    if (s_wifi_radio_started && s_active_wifi_mode == CORE_WEB_WIFI_STA) return true;
     if (!wifi_init_driver()) return false;
 
     esp_netif_create_default_wifi_sta();
@@ -484,23 +529,42 @@ static bool wifi_start_sta(const core_settings_t *s) {
     if (init_once(esp_wifi_start(), "esp_wifi_start") != ESP_OK) return false;
     if (init_once(esp_wifi_connect(), "esp_wifi_connect") != ESP_OK) return false;
     s_wifi_radio_started = true;
+    s_active_wifi_mode = CORE_WEB_WIFI_STA;
     ESP_LOGI(TAG, "WiFi STA avviato: %s", s->wifi_ssid);
     return true;
 }
 
-bool core_web_start(core_settings_t *settings) {
-    s_settings = settings;
-    if (!settings || settings->wifi_ssid[0] == 0) {
-        ESP_LOGI(TAG, "WiFi non configurato (SSID vuoto) — Web GUI non avviata");
+static bool wifi_start_ap(const core_settings_t *s) {
+    if (!s) return false;
+    if (s_wifi_radio_started && s_active_wifi_mode == CORE_WEB_WIFI_AP) return true;
+    if (!wifi_init_driver()) return false;
+
+    esp_netif_create_default_wifi_ap();
+
+    char ap_ssid[32];
+    snprintf(ap_ssid, sizeof(ap_ssid), "MrBin-%05lu", (unsigned long)s->core_id);
+
+    wifi_config_t wcfg = {};
+    snprintf((char *)wcfg.ap.ssid, sizeof(wcfg.ap.ssid), "%s", ap_ssid);
+    wcfg.ap.ssid_len = (uint8_t)strlen(ap_ssid);
+    wcfg.ap.channel = 1;
+    wcfg.ap.max_connection = 4;
+    snprintf((char *)wcfg.ap.password, sizeof(wcfg.ap.password), "12345678");
+    wcfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+
+    if (init_once(esp_wifi_set_mode(WIFI_MODE_AP), "esp_wifi_set_mode") != ESP_OK) return false;
+    if (init_once(esp_wifi_set_config(WIFI_IF_AP, &wcfg), "esp_wifi_set_config") != ESP_OK) {
         return false;
     }
-    if (!wifi_start_sta(settings)) {
-        ESP_LOGW(TAG, "WiFi non avviato — Web GUI non avviata");
-        return false;
-    }
-    if (!core_sd_is_mounted() && !core_sd_init()) {
-        ESP_LOGW(TAG, "SD non montata — pagina video limitata");
-    }
+    if (init_once(esp_wifi_start(), "esp_wifi_start") != ESP_OK) return false;
+    s_wifi_radio_started = true;
+    s_active_wifi_mode = CORE_WEB_WIFI_AP;
+    ESP_LOGI(TAG, "WiFi AP avviato: %s (pass 12345678)", ap_ssid);
+    return true;
+}
+
+static bool start_http_server(void) {
+    if (s_server) return true;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CORE_WEB_PORT;
@@ -532,9 +596,54 @@ bool core_web_start(core_settings_t *settings) {
     return true;
 }
 
+bool core_web_start(core_settings_t *settings, core_web_wifi_mode_t wifi_mode,
+                    const core_gpio_boot_snapshot_t *boot_error) {
+    s_settings = settings;
+    s_boot_error_page = false;
+
+    if (wifi_mode == CORE_WEB_WIFI_AP_BOOT_ERROR) {
+        if (!boot_error) return false;
+        s_boot_error_page = true;
+        s_boot_error_snap = *boot_error;
+        core_status_led_set_mode(CORE_LED_ERROR);
+        if (!wifi_start_ap(settings)) {
+            ESP_LOGE(TAG, "AP errore boot non avviato");
+            return false;
+        }
+    } else if (wifi_mode == CORE_WEB_WIFI_AP) {
+        core_status_led_set_mode(CORE_LED_AP);
+        if (!wifi_start_ap(settings)) {
+            ESP_LOGE(TAG, "WiFi AP non avviato");
+            return false;
+        }
+    } else {
+        if (!settings || settings->wifi_ssid[0] == 0) {
+            ESP_LOGI(TAG, "SSID vuoto — uso AP configurazione");
+            core_status_led_set_mode(CORE_LED_AP);
+            if (!wifi_start_ap(settings)) {
+                return false;
+            }
+        } else if (!wifi_start_sta(settings)) {
+            ESP_LOGW(TAG, "WiFi STA fallito — fallback AP");
+            core_status_led_set_mode(CORE_LED_AP);
+            if (!wifi_start_ap(settings)) {
+                return false;
+            }
+        }
+    }
+
+    if (!core_sd_is_mounted() && !core_sd_init()) {
+        ESP_LOGW(TAG, "SD non montata — pagina video limitata");
+    }
+
+    return start_http_server();
+}
+
 void core_web_stop(void) {
     if (s_server) {
         httpd_stop(s_server);
         s_server = nullptr;
     }
+    core_status_led_set_mode(CORE_LED_OFF);
+    s_boot_error_page = false;
 }

@@ -2,6 +2,89 @@
 
 Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
+## [0.2.1-beta] - 2026-06-22 — Beta: LED WiFi/AP/errore, AP errore boot, snapshot GPIO
+
+**Commit:** `PLACEHOLDER`  
+**Data/ora release:** PLACEHOLDER_DATETIME  
+**Tag:** `v0.2.1-beta`  
+**Stato:** **Beta** (minor) — estende v0.2.0-beta con gestione LED legata al WiFi e pagina errore boot su AP.  
+**Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
+**Versione firmware:** `src/mrbin_core/VERSION` → `0.2.1-beta`
+
+### Aggiunto
+
+#### Modulo `CoreStatusLed` — LED GPIO52 legato al WiFi
+- Task FreeRTOS **`status_led`** con modalità:
+  - **`CORE_LED_STA_CONNECTED`**: dopo connessione STA riuscita (**`IP_EVENT_STA_GOT_IP`**) → **3 lampeggi** ogni **500 ms** (impulso 150 ms), poi LED spento.
+  - **`CORE_LED_AP`**: in modalità **AP** → **1 lampeggio ogni 2 s** continuo fino a cambio modalità o `core_web_stop()`.
+  - **`CORE_LED_ERROR`**: **100 ms** on/off continuo (priorità su pattern AP).
+  - **`CORE_LED_OFF`**: LED spento.
+- Inizializzazione in `app_main` via `core_status_led_init()` (GPIO52 output, active-high).
+- Costanti in `CoreConfig.h`: `CORE_STATUS_LED_STA_BLINK_MS/COUNT/PULSE_MS`, `CORE_STATUS_LED_AP_BLINK_MS`, `CORE_STATUS_LED_ERROR_BLINK_MS`.
+
+#### Snapshot GPIO al boot (`core_gpio_boot_snapshot_t`)
+- `core_gpio_save_boot_snapshot()` subito dopo `gpio_init` — salva livelli **D1**, **D2**, **MODE** al reset.
+- Usato per messaggio errore Web e log diagnostici.
+
+#### Errore boot PIR — AP + Web + LED errore
+- Se **GPIO29 LOW** e **D1 non attivo** (wake non riconosciuto):
+  - Avvio **WiFi AP** `MrBin-XXXXX` / pass `12345678`.
+  - **Web GUI** su porta **1510** con banner **rosso** in home/login:
+    `ERRORE BOOT PIN non riconosciuto, D1=xxx D2=xxx MODE=xxx` (valori snapshot al boot).
+  - LED in modalità **errore** (100 ms), **non** lampeggio AP a 2 s (anche se radio in AP).
+  - Loop attesa (TPL resta alimentato).
+
+#### API Web estesa (`CoreWeb.h`)
+- `core_web_start(settings, wifi_mode, boot_error)` con enum:
+  - `CORE_WEB_WIFI_STA` — connessione STA se SSID presente.
+  - `CORE_WEB_WIFI_AP` — AP configurazione (SSID assente o fallback).
+  - `CORE_WEB_WIFI_AP_BOOT_ERROR` — AP + pagina errore boot.
+- Handler **`IP_EVENT_STA_GOT_IP`** → `core_status_led_notify_sta_connected()`.
+
+### Modificato
+
+#### `CoreWeb.cpp`
+- Ripristinato **`wifi_start_ap()`** per config ed errore boot.
+- **Config GPIO29 HIGH**:
+  - SSID in NVS → STA + Web; LED lampeggia 3×500 ms solo dopo IP ottenuto.
+  - SSID vuoto → AP + lampeggio 2 s.
+  - STA fallito → fallback AP + lampeggio 2 s.
+- **`core_web_stop()`** spegne LED (`CORE_LED_OFF`).
+- Pagina login dinamica con classe CSS `.boot-err` (rosso, bordo) se errore boot.
+
+#### `CoreGPIO`
+- Rimosso `core_gpio_blink_error_forever()` (sostituito da `CoreStatusLed` + AP/Web).
+- Aggiunti `core_gpio_save_boot_snapshot()` / `core_gpio_get_boot_snapshot()`.
+
+#### `mrbin_core_main.cpp`
+- `core_gpio_save_boot_snapshot()` + `core_status_led_init()` dopo init GPIO.
+- `run_config_mode()`: chiama `core_web_start()` con modalità STA o AP.
+- `run_pir_mode()`: errore → `CORE_WEB_WIFI_AP_BOOT_ERROR` con snapshot.
+
+#### `CMakeLists.txt`
+- Aggiunto `CoreStatusLed.cpp`.
+
+### Comportamento LED — riepilogo
+
+| Scenario | WiFi | LED GPIO52 |
+|----------|------|------------|
+| STA connesso (GOT IP) | STA | 3× @ 500 ms, poi off |
+| AP config / fallback | AP | 1 flash ogni 2 s |
+| Errore boot (no D1) | AP | 100 ms continuo |
+| Uscita config (DONE) | stop | off |
+| Registrazione PIR | off | off |
+
+### Note Beta / test
+
+1. Errore boot: verificare AP `MrBin-XXXXX`, pagina `/` con testo rosso e valori D1/D2/MODE coerenti col cablaggio.
+2. Config con SSID: LED 3 lampeggi **solo dopo** connessione rete (non all’avvio STA).
+3. Config senza SSID: AP + lampeggio lento 2 s.
+4. In errore boot il lampeggio deve restare **rapido** (100 ms), non lento AP.
+
+### Problemi noti (invariati da v0.2.0-beta)
+
+- Soglia 50 MB SD, fast-boot PSRAM→muxer, docs `CORE_FIRMWARE.md` da aggiornare.
+
 ## [0.2.0-beta] - 2026-06-22 — Beta: GPIO29 config, fast-boot PSRAM, Web condizionale, LED errore
 
 **Commit:** `01340dfc65576e8e8849c037a8653e7aeb00b477`  
@@ -154,6 +237,7 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 - **Registrazione:** H264 HW identico a `CORE_VIDEO_*` in `CoreConfig.h`.
 - **Build:** `idf.py -p COM15 flash monitor` con ESP-IDF **v5.5.4** (non 6.x per compatibilità chip rev e componenti).
 
+[0.2.1-beta]: https://github.com/mirkomare/MrBin/releases/tag/v0.2.1-beta
 [0.2.0-beta]: https://github.com/mirkomare/MrBin/releases/tag/v0.2.0-beta
 [0.1.1]: https://github.com/mirkomare/MrBin/releases/tag/v0.1.1
 [0.1.0]: https://github.com/mirkomare/MrBin/releases/tag/v0.1.0

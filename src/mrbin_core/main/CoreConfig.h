@@ -12,7 +12,11 @@
 // LED errore boot PIR senza D1 — header 2x20 alto-sx, HIGH=on, pull-down esterno
 #define CORE_GPIO_STATUS_LED      GPIO_NUM_52
 #define CORE_STATUS_LED_ON_LEVEL  1
-#define CORE_STATUS_LED_BLINK_MS  100
+#define CORE_STATUS_LED_ERROR_BLINK_MS  100
+#define CORE_STATUS_LED_AP_BLINK_MS     2000
+#define CORE_STATUS_LED_STA_BLINK_MS    500
+#define CORE_STATUS_LED_STA_BLINK_COUNT 3
+#define CORE_STATUS_LED_STA_PULSE_MS    150
 
 // --- Rete / Web ---
 #define CORE_WEB_PORT       1510
