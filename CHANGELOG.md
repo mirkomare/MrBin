@@ -4,8 +4,8 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 ## [0.2.1-beta] - 2026-06-22 — Beta: LED WiFi/AP/errore, AP errore boot, snapshot GPIO
 
-**Commit:** `PLACEHOLDER`  
-**Data/ora release:** PLACEHOLDER_DATETIME  
+**Commit:** `6fdcda634c1eeeea70710706b069b0c9be5f3284`  
+**Data/ora release:** 2026-06-22 16:08:19 +0200  
 **Tag:** `v0.2.1-beta`  
 **Stato:** **Beta** (minor) — estende v0.2.0-beta con gestione LED legata al WiFi e pagina errore boot su AP.  
 **Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
