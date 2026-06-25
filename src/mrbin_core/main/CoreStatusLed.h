@@ -11,6 +11,7 @@ typedef enum {
     CORE_LED_STA_CONNECTED,  // 3 lampeggi @ 500 ms poi OFF
     CORE_LED_AP,             // 1 lampeggio ogni 2 s (fino a cambio modalità)
     CORE_LED_ERROR,          // lampeggio rapido 100 ms continuo
+    CORE_LED_RECORDING,      // acceso fisso durante registrazione PIR
 } core_status_led_mode_t;
 
 bool core_status_led_init(void);

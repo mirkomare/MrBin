@@ -5,8 +5,11 @@
 #include "encoder/esp_video_enc_default.h"
 #include "esp_capture.h"
 #include "esp_capture_sink.h"
+#include "esp_http_server.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "impl/esp_capture_video_v4l2_src.h"
 #include <stdio.h>
@@ -15,13 +18,26 @@
 static const char *TAG = "core_live";
 static const char *MJPEG_BOUNDARY = "mrbinframe";
 
+#define LIVE_STREAM_WORKER_STACK  32768
+#define LIVE_STREAM_WORKER_PRIO   5
+
 static esp_capture_handle_t s_capture = nullptr;
 static esp_capture_video_src_if_t *s_vsrc = nullptr;
 static esp_capture_sink_handle_t s_sink = nullptr;
 static bool s_running = false;
+static volatile bool s_abort_requested = false;
+
+static QueueHandle_t s_stream_queue = nullptr;
+static SemaphoreHandle_t s_worker_ready = nullptr;
+static TaskHandle_t s_worker_task = nullptr;
+
+typedef struct {
+    httpd_req_t *req;
+} live_stream_job_t;
 
 bool core_live_start(void) {
     if (s_running) return true;
+    s_abort_requested = false;
 
     if (!core_video_init()) {
         ESP_LOGE(TAG, "Video init fallita");
@@ -115,7 +131,15 @@ void core_live_stop(void) {
     ESP_LOGI(TAG, "Live fermato");
 }
 
-esp_err_t core_live_stream(httpd_req_t *req) {
+void core_live_request_stop(void) {
+    s_abort_requested = true;
+}
+
+bool core_live_is_running(void) {
+    return s_running;
+}
+
+static esp_err_t core_live_stream_impl(httpd_req_t *req) {
     if (!core_live_start()) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Camera non disponibile");
         return ESP_FAIL;
@@ -135,7 +159,13 @@ esp_err_t core_live_stream(httpd_req_t *req) {
     char part_hdr[96];
     uint32_t sent_frames = 0;
     while (true) {
-        esp_capture_err_t err = esp_capture_sink_acquire_frame(s_sink, &frame, false);
+        if (s_abort_requested) {
+            ESP_LOGI(TAG, "Live interrotto per registrazione");
+            s_abort_requested = false;
+            break;
+        }
+
+        esp_capture_err_t err = esp_capture_sink_acquire_frame(s_sink, &frame, true);
         if (err != ESP_CAPTURE_ERR_OK) {
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
@@ -171,5 +201,86 @@ esp_err_t core_live_stream(httpd_req_t *req) {
 
     httpd_resp_send_chunk(req, nullptr, 0);
     core_live_stop();
+    return ESP_OK;
+}
+
+static void live_stream_worker(void *) {
+    ESP_LOGI(TAG, "Worker live stream avviato");
+    while (true) {
+        xSemaphoreGive(s_worker_ready);
+
+        live_stream_job_t job;
+        if (xQueueReceive(s_stream_queue, &job, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Live stream async — connessione client");
+        core_live_stream_impl(job.req);
+
+        if (httpd_req_async_handler_complete(job.req) != ESP_OK) {
+            ESP_LOGW(TAG, "httpd_req_async_handler_complete fallita");
+        }
+    }
+}
+
+bool core_live_async_init(void) {
+    if (s_worker_task) {
+        return true;
+    }
+
+    s_worker_ready = xSemaphoreCreateCounting(1, 0);
+    if (!s_worker_ready) {
+        return false;
+    }
+
+    s_stream_queue = xQueueCreate(1, sizeof(live_stream_job_t));
+    if (!s_stream_queue) {
+        vSemaphoreDelete(s_worker_ready);
+        s_worker_ready = nullptr;
+        return false;
+    }
+
+    if (xTaskCreate(live_stream_worker, "live_stream", LIVE_STREAM_WORKER_STACK, nullptr,
+                    LIVE_STREAM_WORKER_PRIO, &s_worker_task) != pdPASS) {
+        vQueueDelete(s_stream_queue);
+        vSemaphoreDelete(s_worker_ready);
+        s_stream_queue = nullptr;
+        s_worker_ready = nullptr;
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Async live stream pronto");
+    return true;
+}
+
+esp_err_t core_live_stream(httpd_req_t *req) {
+    if (!core_live_async_init()) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Live worker non disponibile");
+        return ESP_FAIL;
+    }
+
+    httpd_req_t *async_req = nullptr;
+    if (httpd_req_async_handler_begin(req, &async_req) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Async live fallito");
+        return ESP_FAIL;
+    }
+
+    if (xSemaphoreTake(s_worker_ready, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "Live stream già attivo");
+        httpd_req_async_handler_complete(async_req);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "Live stream busy", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    live_stream_job_t job = { .req = async_req };
+    if (xQueueSend(s_stream_queue, &job, pdMS_TO_TICKS(100)) != pdTRUE) {
+        xSemaphoreGive(s_worker_ready);
+        httpd_req_async_handler_complete(async_req);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Coda live piena");
+        return ESP_FAIL;
+    }
+
     return ESP_OK;
 }

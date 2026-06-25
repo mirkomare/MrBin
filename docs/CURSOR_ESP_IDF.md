@@ -18,13 +18,29 @@ Il workspace apre due cartelle:
 
 L'estensione **Espressif IDF** (`espressif.esp-idf-extension`) va installata in Cursor (gia' consigliata dal workspace).
 
+### IMPORTANTE — modalita' Glass vs Editor
+
+Cursor 3.x si riapre spesso in **Glass** (interfaccia Agent). In Glass **l'estensione ESP-IDF non si carica** e non compare la barra in basso.
+
+**All'apertura usa sempre uno di questi:**
+
+1. **Doppio clic** su `Apri-Cursor-ESP-IDF.cmd` (root repo) — apre il workspace in modalita' **classica**
+2. Oppure da terminale: `cursor --classic C:\CURSOR\Mrbin\MrBin.code-workspace`
+3. Se sei gia' in Glass: menu in alto → **Open IDE** / **Apri IDE** (comando interno `glass.openIde`)
+
+La prima volta che hai flashato probabilmente eri nell'**Editor classico**; alla chiusura Cursor ha ripristinato **Glass**.
+
 Se non compare la **barra ESP-IDF** in basso (chip, build, flash, monitor):
 
-1. Apri **`MrBin.code-workspace`** (non la sola cartella root)
-2. `Ctrl+Shift+P` → **Developer: Reload Window**
-3. Nel pannello **Explorer**, seleziona un file sotto **MrBin CORE (ESP-IDF)** (es. `main/mrbin_core_main.cpp`)
-4. Se ancora assente: `Ctrl+Shift+X` → **ESP-IDF** → verifica abilitata
-5. `Ctrl+Shift+P` → **ESP-IDF: Doctor Command** (deve leggere v5.5.4)
+1. Apri **`MrBin.code-workspace`** (non la sola cartella root `Mrbin`)
+2. **View → Appearance → Status Bar** deve essere attivo
+3. `Ctrl+Shift+P` → **Developer: Reload Window**
+4. `Ctrl+Shift+P` → **ESP-IDF: Doctor Command** — **obbligatorio al primo avvio in Cursor** (forza l'attivazione dell'estensione)
+5. Nel pannello **Explorer**, seleziona un file sotto **MrBin CORE (ESP-IDF)** (es. `main/mrbin_core_main.cpp`)
+6. Se ancora assente: `Ctrl+Shift+X` → **ESP-IDF** → verifica abilitata (non disabilitata per workspace)
+7. Controlla **Output** → canale **ESP-IDF** per errori di avvio
+
+**Nota Cursor:** nei log risulta che l'estensione non si auto-attiva da sola; il comando **Doctor** (passo 4) la carica. Rimuovere `idf.eimExecutableArgs` con `wizard` dalle impostazioni utente se compare un wizard bloccato all'avvio.
 
 La barra compare solo quando l'estensione e' attiva sulla cartella progetto `src/mrbin_core` (impostato con `idf.extensionActivationMode: always` nel workspace).
 

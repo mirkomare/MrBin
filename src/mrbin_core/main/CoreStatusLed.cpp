@@ -68,6 +68,11 @@ static void led_task(void *) {
             break;
         }
 
+        case CORE_LED_RECORDING:
+            led_write(CORE_STATUS_LED_ON_LEVEL);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            break;
+
         case CORE_LED_OFF:
         default:
             led_write(s_off_level);

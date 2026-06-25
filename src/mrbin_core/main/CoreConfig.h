@@ -67,6 +67,10 @@
 
 // --- Registrazione fast-boot (buffer PSRAM pre-SD + mux MP4 su SD) ---
 #define CORE_H264_PSRAM_MAX_BYTES   (12U * 1024U * 1024U)   // ~12 MB in PSRAM
+#define CORE_MUXER_RAM_CACHE_BYTES  (512U * 1024U)          // cache muxer → meno flush SD
+#define CORE_REC_ENCRYPT_IO_BYTES   (512U * 1024U)          // buffer cifratura (heap, non static)
+#define CORE_CRYPTO_STREAM_IO_BYTES (64U * 1024U)           // buffer decifratura stream web
+#define CORE_SD_FILE_BUF_BYTES      (32U * 1024U)           // setvbuf FILE durante I/O SD
 #define CORE_SD_PREP_TASK_STACK     4096
 #define CORE_SD_PREP_TASK_PRIO      3
 #define CORE_REC_ACQUIRE_TIMEOUT_MS 100

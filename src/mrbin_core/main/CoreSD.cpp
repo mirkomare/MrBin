@@ -13,6 +13,7 @@
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #endif
 #include "sys/stat.h"
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -68,7 +69,7 @@ bool core_sd_init(void) {
 
     esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {
         .format_if_mount_failed = false,
-        .max_files = 8,
+        .max_files = 12,
         .allocation_unit_size = 16 * 1024,
     };
 
@@ -199,7 +200,13 @@ bool core_sd_ensure_space(uint64_t min_free) {
         if (!delete_oldest_day_dir()) break;
         guard++;
     }
-    return core_sd_free_bytes() >= min_free;
+    uint64_t free_b = core_sd_free_bytes();
+    if (free_b < min_free) {
+        ESP_LOGE(TAG, "Spazio insufficiente: %llu bytes liberi, richiesti %llu",
+                 (unsigned long long)free_b, (unsigned long long)min_free);
+        return false;
+    }
+    return true;
 }
 
 bool core_sd_make_day_dir(char *out_path, size_t out_len) {
@@ -213,7 +220,9 @@ bool core_sd_make_day_dir(char *out_path, size_t out_len) {
     snprintf(out_path, out_len, "%s/%s", CORE_SD_MOUNT_POINT, day);
     struct stat st;
     if (stat(out_path, &st) == 0 && S_ISDIR(st.st_mode)) return true;
-    return mkdir(out_path, 0755) == 0;
+    if (mkdir(out_path, 0755) == 0) return true;
+    ESP_LOGE(TAG, "mkdir %s fallito: errno=%d", out_path, errno);
+    return false;
 }
 
 bool core_sd_make_recording_path(const char *day_dir, uint32_t core_id,

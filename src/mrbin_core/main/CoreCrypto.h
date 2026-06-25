@@ -9,14 +9,19 @@
 extern "C" {
 #endif
 
+#include "mbedtls/aes.h"
+
 typedef struct {
     uint8_t iv[16];
     uint8_t key[16];
     uint64_t block_offset;
     bool initialized;
+    bool aes_ready;
+    mbedtls_aes_context aes;
 } core_crypto_ctx_t;
 
 bool core_crypto_init_ctx(core_crypto_ctx_t *ctx, const uint8_t key[16], const uint8_t iv[16]);
+void core_crypto_deinit_ctx(core_crypto_ctx_t *ctx);
 void core_crypto_reset_block_offset(core_crypto_ctx_t *ctx, uint64_t block_offset);
 
 // Cifra/decifra in-place (AES-128-CTR via mbedTLS)
