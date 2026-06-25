@@ -2,6 +2,79 @@
 
 Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
+## [0.4.0] - 2026-06-25 — Stable: registrazione web, video cifrati MRBI, performance I/O
+
+**Commit:** `b9329ae6c5df8848f80cf2babceac11d240dcb86`  
+**Data/ora release:** 2026-06-25 03:45:23 +0200  
+**Tag:** `v0.4.0`  
+**Stato:** **Stable** (minor) — registrazione manuale da Web GUI, gestione video cifrati su SD, ottimizzazioni I/O cifratura/decifratura.  
+**Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
+**Versione firmware:** `src/mrbin_core/VERSION` → `0.4.0`
+
+### Aggiunto
+
+#### Registrazione manuale da Web (`CoreRecorder`, `CoreWeb`)
+- API **`core_recorder_manual_*`**: start, stop, wait, status con frame count e percorso ultimo file.
+- Pagina **Live**: pulsanti **Registra** / **Stop**, polling `/live/record/status`, live MJPEG sospeso durante registrazione H264 su SD.
+- Endpoint HTTP: `POST /live/record/start`, `POST /live/record/stop`, `GET /live/record/status`.
+- **Cifratura in background** (`enc_mp4` task) dopo stop web: risposta HTTP al termine del mux, cifratura AES continua in task separato.
+- Modalità **PIR (D2)** invariata: cifratura **sincrona** prima del segnale TPL DONE.
+
+#### Pagina Video e streaming decifrato (`CoreWeb`)
+- Elenco SD con **dimensione file**, stato **Elaborazione…** per `.mp4.tmp`, avviso SD non montata.
+- **Riproduzione browser** (`/videos/watch` + `/play?f=…`) e **download MP4 decifrato** (`/videos/download?f=…`).
+- **Eliminazione singolo file** (`POST /videos/delete`).
+- Formato file: **`[MRBI 4B][IV 16B][MP4 AES-128-CTR cifrato]`** — decifratura on-the-fly in stream HTTP.
+- URL query con **`%2F`** per path annidati (`url_encode_query` / `url_decode`).
+
+#### Formato e cifratura MP4 (`CoreRecorder`, `CoreCrypto`)
+- Flusso affidabile: mux **plain** su `{nome}.mp4.tmp` → **`encrypt_mp4_file()`** → `{nome}.mp4` finale.
+- Validazione **`ftyp`** sui primi 512 byte del tmp prima della cifratura.
+- **`core_crypto_deinit_ctx()`** e contesto **`mbedtls_aes`** persistente nel ctx (niente re-init per chunk).
+- Costanti buffer in `CoreConfig.h`: `CORE_MUXER_RAM_CACHE_BYTES` (512 KB), `CORE_REC_ENCRYPT_IO_BYTES` (512 KB), `CORE_CRYPTO_STREAM_IO_BYTES` (64 KB), `CORE_SD_FILE_BUF_BYTES` (32 KB).
+
+#### LED registrazione (`CoreStatusLed`)
+- Modalità **`CORE_LED_RECORDING`**: LED **acceso fisso** durante registrazione (PIR e manuale).
+
+#### Tooling sviluppo Cursor / ESP-IDF
+- **`Apri-Cursor-ESP-IDF.cmd`**: apre workspace in modalità Editor classica (Glass non carica ESP-IDF).
+- Script **`scripts/build-core.cmd`**, **`scripts/build-flash.cmd`**.
+- **`docs/CURSOR_ESP_IDF.md`**: sezione Glass vs Editor, Doctor obbligatorio, status bar.
+- **`MrBin.code-workspace`**: path ESP-IDF, `idf.extensionActivationMode: always`, variabili target esp32p4.
+
+### Modificato
+
+#### `CoreRecorder.cpp`
+- **`recorder_run_core()`** unificato per sessione PIR e registrazione web (`async_encrypt` flag).
+- **`encrypt_mp4_file()`**: buffer heap 512 KB (interno → PSRAM → fallback 64 KB), **`setvbuf` 32 KB** su FILE (heap, non static).
+- Log periodico stato, timeout attesa rilascio D2, drain frame, last-chance mux.
+- Task background **`encrypt_bg_task`** con stack 16 KB, fallback sync se memoria/task fallisce.
+
+#### `CoreWeb.cpp`
+- **`stream_decrypted_mp4()`**: buffer **64 KB** + `setvbuf` 32 KB (prima 8 KB stack).
+- CSS pagina Video: righe `.vid-row`, pulsanti download/elimina separati da titolo link.
+- Mount SD esplicito su handler `/videos` se non montata.
+
+#### `CoreSD.cpp`
+- **`max_files`**: 8 → **12** (più handle aperti durante mux + web).
+- Log **`errno`** su `mkdir` e spazio insufficiente.
+
+#### `CoreLive`
+- **`core_live_request_stop()`** / **`core_live_is_running()`** per cedere la camera alla registrazione manuale.
+
+### Corretto
+
+- **Boot loop** (`HS_MP: mempool create failed`): rimossi buffer **static** 128 KB; solo allocazione heap/PSRAM.
+- **Elenco video vuoto**: mount SD mancante su `/videos`; file `.mp4.tmp` ora visibili come in elaborazione.
+- **Download corrotto / path troncati**: encoding `%2F` nel parametro query `f`.
+- **Pulsante download gigante senza testo**: CSS `flex:1` applicato solo a `.vid-title`, non a tutti i link.
+- **File MP4 illeggibili** da cifratura streaming durante mux: **revert** a tmp plain + post-encrypt.
+
+### Note
+
+- La cifratura resta limitata dalla velocità della **SD card**; con buffer ampliati e background task lo stop web è percepibilmente più rapido.
+- Durante cifratura background il file compare come **Elaborazione…** finché non appare il `.mp4` finale.
+
 ## [0.3.0] - 2026-06-23 — Stable: pagina errore boot con livelli GPIO HIGH/LOW
 
 **Commit:** `6496842c9dd7018ec77f247b9570d52807a30638`  
