@@ -2,14 +2,16 @@
 
 Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
-## [0.4.0] - 2026-06-25 — Stable: registrazione web, video cifrati MRBI, performance I/O
+**Versioning:** se non indicato diversamente, incrementare sempre l’**ultimo numero** (patch: `0.3.0` → `0.3.1`). Minor/major solo su richiesta esplicita.
+
+## [0.3.1] - 2026-06-25 — Patch: registrazione web, video cifrati MRBI, performance I/O
 
 **Commit:** `b9329ae6c5df8848f80cf2babceac11d240dcb86`  
 **Data/ora release:** 2026-06-25 03:45:23 +0200  
-**Tag:** `v0.4.0`  
-**Stato:** **Stable** (minor) — registrazione manuale da Web GUI, gestione video cifrati su SD, ottimizzazioni I/O cifratura/decifratura.  
+**Tag:** `v0.3.1`  
+**Stato:** **Stable** (patch) — registrazione manuale da Web GUI, gestione video cifrati su SD, ottimizzazioni I/O cifratura/decifratura.  
 **Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
-**Versione firmware:** `src/mrbin_core/VERSION` → `0.4.0`
+**Versione firmware:** `src/mrbin_core/VERSION` → `0.3.1`
 
 ### Aggiunto
 
