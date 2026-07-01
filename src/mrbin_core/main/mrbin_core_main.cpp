@@ -1,5 +1,4 @@
 #include "CoreConfig.h"
-#include "CoreEncFs.h"
 #include "CoreGPIO.h"
 #include "CoreRecorder.h"
 #include "CoreSettings.h"
@@ -16,6 +15,25 @@
 
 static const char *TAG = "mrbin_core";
 static core_settings_t g_settings;
+
+int64_t g_core_boot_us = 0;
+
+int64_t core_boot_elapsed_ms(void) {
+    if (g_core_boot_us == 0) {
+        return 0;
+    }
+    return (esp_timer_get_time() - g_core_boot_us) / 1000;
+}
+
+void core_time_init(void) {
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+    tzset();
+    done = true;
+}
 
 static void log_reset_reason(void) {
     esp_reset_reason_t r = esp_reset_reason();
@@ -42,6 +60,7 @@ static void disable_radio_for_recording(void) {
 
 static void recover_tmp_task(void *arg) {
     core_settings_t *settings = (core_settings_t *)arg;
+    vTaskDelay(pdMS_TO_TICKS(CORE_CONFIG_RECOVER_TMP_DELAY_MS));
     core_recorder_recover_tmp_files(settings);
     vTaskDelete(nullptr);
 }
@@ -89,7 +108,8 @@ static void run_config_mode(void) {
 static void run_pir_mode(void) {
     core_gpio_boot_snapshot_t snap;
     core_gpio_get_boot_snapshot(&snap);
-    ESP_LOGI(TAG, "Operatività normale — registrazione (boot D1=%d D2=%d MODE=%d, start GPIO%d stop GPIO%d)",
+    ESP_LOGI(TAG, "PIR boot rapido (%lld ms) — D1=%d D2=%d MODE=%d, start GPIO%d stop GPIO%d",
+             (long long)core_boot_elapsed_ms(),
              snap.d1_level, snap.d2_level, snap.mode_level,
              (int)g_settings.rec_gpio_start, (int)g_settings.rec_gpio_stop);
     disable_radio_for_recording();
@@ -97,8 +117,7 @@ static void run_pir_mode(void) {
 }
 
 extern "C" void app_main(void) {
-    ESP_LOGI(TAG, "MrBin CORE avvio (ESP32-P4 Waveshare)");
-    log_reset_reason();
+    g_core_boot_us = esp_timer_get_time();
 
     if (!core_settings_init()) {
         ESP_LOGE(TAG, "NVS init fallita");
@@ -114,18 +133,20 @@ extern "C" void app_main(void) {
     }
 
     core_gpio_save_boot_snapshot();
-    core_status_led_init();
     core_gpio_set_rec_pins(g_settings.rec_gpio_start, g_settings.rec_gpio_stop);
-    core_encfs_register();
 
-    setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
-    tzset();
+    const bool config_mode = core_gpio_is_mode_config();
 
-    core_gpio_log_inputs();
+    core_status_led_init();
 
-    if (core_gpio_is_mode_config()) {
+    if (config_mode) {
+        ESP_LOGI(TAG, "MrBin CORE avvio — modalità CONFIG");
+        log_reset_reason();
+        core_time_init();
+        core_gpio_log_inputs();
         run_config_mode();
     } else {
+        ESP_LOGI(TAG, "MrBin CORE avvio — modalità PIR (registrazione immediata)");
         run_pir_mode();
     }
 }

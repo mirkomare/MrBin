@@ -1,6 +1,7 @@
 #include "CoreRecorder.h"
 #include "CoreConfig.h"
 #include "CoreCrypto.h"
+#include "CoreEncFs.h"
 #include "CoreGPIO.h"
 #include "CoreH264Buffer.h"
 #include "CoreSD.h"
@@ -543,9 +544,9 @@ static void recorder_capture_cleanup(recorder_capture_t *rc) {
     rc->running = false;
 }
 
-static bool recorder_capture_start_psram(recorder_capture_t *rc) {
+static bool recorder_capture_start_psram(recorder_capture_t *rc, uint32_t warmup_frames) {
     memset(rc, 0, sizeof(*rc));
-    rc->warmup_left = CORE_REC_WARMUP_DROP_FRAMES;
+    rc->warmup_left = warmup_frames;
 
     if (!core_video_init()) {
         ESP_LOGE(TAG, "core_video_init fallita");
@@ -1333,6 +1334,8 @@ static void sd_prep_task(void *arg) {
     sd_prep_ctx_t *ctx = (sd_prep_ctx_t *)arg;
     int64_t t0 = esp_timer_get_time();
 
+    core_time_init();
+
     ctx->sd_mounted = core_sd_init();
     if (ctx->sd_mounted) {
         if (core_sd_ensure_space(CORE_SD_MIN_FREE_BYTES)) {
@@ -1431,12 +1434,10 @@ static bool recorder_finalize_save(const core_settings_t *settings, const sd_pre
 
 static bool recorder_run_core(const core_settings_t *settings, recorder_should_stop_fn_t should_stop,
                               bool async_encrypt, const char *stop_label,
-                              char *out_path, size_t out_path_len) {
+                              char *out_path, size_t out_path_len, uint32_t warmup_frames) {
     if (!settings || !should_stop) {
         return false;
     }
-
-    int64_t boot_t0 = esp_timer_get_time();
 
     sd_prep_ctx_t sd_ctx = {
         .ev = xEventGroupCreate(),
@@ -1458,14 +1459,28 @@ static bool recorder_run_core(const core_settings_t *settings, recorder_should_s
         return false;
     }
 
+    if (!core_encfs_register()) {
+        ESP_LOGE(TAG, "VFS /enc non disponibile");
+        vEventGroupDelete(sd_ctx.ev);
+        return false;
+    }
+
     recorder_capture_t capture = {};
     core_h264_buffer_t ring_buf = {};
     SemaphoreHandle_t ring_mtx = xSemaphoreCreateMutex();
 
     bool sd_prep_done = false;
+
+    // PIR: camera subito, SD monta in parallelo dopo (non blocca capture).
+    bool capture_ok = recorder_capture_start_psram(&capture, warmup_frames);
+    if (capture_ok) {
+        core_status_led_set_mode(CORE_LED_RECORDING);
+        ESP_LOGI(TAG, "Capture avviata in %lld ms dal boot (warmup=%lu frame, SD in parallelo)",
+                 (long long)core_boot_elapsed_ms(), (unsigned long)warmup_frames);
+    }
+
     xTaskCreate(sd_prep_task, "sd_prep", CORE_SD_PREP_TASK_STACK, &sd_ctx, CORE_SD_PREP_TASK_PRIO, nullptr);
 
-    bool capture_ok = recorder_capture_start_psram(&capture);
     if (!capture_ok || !ring_mtx) {
         ESP_LOGE(TAG, "Capture/mutex non avviati — impossibile registrare");
         xEventGroupWaitBits(sd_ctx.ev, SD_PREP_DONE_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
@@ -1486,7 +1501,6 @@ static bool recorder_run_core(const core_settings_t *settings, recorder_should_s
         return false;
     }
 
-    core_status_led_set_mode(CORE_LED_RECORDING);
     ESP_LOGI(TAG, "Registrazione dual-job: %dfps → ring → SD (lag %u ms, catch-up automatico)",
              CORE_VIDEO_FPS, (unsigned)CORE_REC_SD_LAG_MS);
 
@@ -1628,7 +1642,7 @@ static void manual_rec_task(void *arg) {
     manual_rec_arg_t *ctx = (manual_rec_arg_t *)arg;
     char saved_path[128] = {0};
     bool saved = recorder_run_core(&ctx->settings, manual_should_stop, true, "web stop",
-                                   saved_path, sizeof(saved_path));
+                                   saved_path, sizeof(saved_path), CORE_REC_WARMUP_DROP_FRAMES);
     s_manual_last_saved = saved;
     if (saved) {
         snprintf(s_manual_last_path, sizeof(s_manual_last_path), "%s", saved_path);
@@ -1724,9 +1738,8 @@ bool core_recorder_run_session(const core_settings_t *settings) {
         return false;
     }
 
-    core_gpio_log_inputs();
     bool saved = recorder_run_core(settings, rec_stop_should_stop, false, "stop GPIO",
-                                     nullptr, 0);
+                                     nullptr, 0, CORE_REC_WARMUP_DROP_FRAMES_PIR);
     core_gpio_hold_tpl_done(settings->d2_post_delay_ms);
     return saved;
 }

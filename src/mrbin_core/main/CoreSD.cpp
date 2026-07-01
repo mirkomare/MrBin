@@ -5,8 +5,10 @@
 #include "driver/sdmmc_default_configs.h"
 #include "driver/sdmmc_host.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdmmc_cmd.h"
 #if SOC_SDMMC_IO_POWER_EXTERNAL
@@ -29,6 +31,7 @@
 static const char *TAG = "core_sd";
 static sdmmc_card_t *s_card = nullptr;
 static bool s_mounted = false;
+static SemaphoreHandle_t s_mount_mtx = nullptr;
 #if SOC_SDMMC_IO_POWER_EXTERNAL
 static sd_pwr_ctrl_handle_t s_pwr_ctrl = nullptr;
 #endif
@@ -60,7 +63,7 @@ static bool core_sd_setup_ldo(void) {
 }
 #endif
 
-bool core_sd_init(void) {
+static bool core_sd_mount_once(void) {
     if (s_mounted) return true;
 
 #if SOC_SDMMC_IO_POWER_EXTERNAL
@@ -69,7 +72,7 @@ bool core_sd_init(void) {
 
     esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {
         .format_if_mount_failed = false,
-        .max_files = 12,
+        .max_files = CORE_SD_MOUNT_MAX_FILES,
         .allocation_unit_size = 16 * 1024,
     };
 
@@ -113,6 +116,48 @@ bool core_sd_init(void) {
     ESP_LOGI(TAG, "SD montata su %s", CORE_SD_MOUNT_POINT);
     sdmmc_card_print_info(stdout, s_card);
     return true;
+}
+
+bool core_sd_init(void) {
+    if (s_mounted) return true;
+
+    if (!s_mount_mtx) {
+        s_mount_mtx = xSemaphoreCreateMutex();
+        if (!s_mount_mtx) {
+            return core_sd_mount_once();
+        }
+    }
+
+    if (xSemaphoreTake(s_mount_mtx, pdMS_TO_TICKS(30000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Timeout mutex mount SD");
+        return s_mounted;
+    }
+
+    bool ok = core_sd_mount_once();
+    xSemaphoreGive(s_mount_mtx);
+    return ok;
+}
+
+bool core_sd_init_boot(void) {
+    if (s_mounted) return true;
+
+    ESP_LOGI(TAG, "Boot config: mount SD (%d tentativi max)...", CORE_SD_BOOT_RETRY_COUNT);
+    for (int attempt = 0; attempt < CORE_SD_BOOT_RETRY_COUNT; ++attempt) {
+        if (attempt > 0) {
+            ESP_LOGW(TAG, "Boot config: retry SD (%d/%d)...", attempt + 1, CORE_SD_BOOT_RETRY_COUNT);
+            vTaskDelay(pdMS_TO_TICKS(CORE_SD_BOOT_RETRY_MS));
+        }
+        size_t free_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        size_t free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        ESP_LOGI(TAG, "Heap pre-mount: int=%u KB dma=%u KB psram=%u KB",
+                 (unsigned)(free_int / 1024), (unsigned)(free_dma / 1024),
+                 (unsigned)(free_psram / 1024));
+        if (core_sd_init()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool core_sd_is_mounted(void) {

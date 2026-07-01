@@ -50,14 +50,15 @@ static_assert(CORE_GPIO_MODE_CFG == GPIO_NUM_29, "PIN CONGELATO: MODE deve resta
 #define CORE_VIDEO_QP_MIN   20
 #define CORE_VIDEO_QP_MAX   36
 #define CORE_VIDEO_DEV_NAME "/dev/video0"
-#define CORE_REC_WARMUP_DROP_FRAMES   8
-#define CORE_REC_SD_WAIT_MS           0    // capture subito; SD monta in parallelo
+#define CORE_REC_WARMUP_DROP_FRAMES     8    // config / registrazione manuale web
+#define CORE_REC_WARMUP_DROP_FRAMES_PIR 2    // PIR: pochi frame scartati, capture subito
+#define CORE_REC_SD_WAIT_MS             0    // capture subito; SD monta in parallelo
 #define CORE_VIDEO_FRAME_DUR_MS    (1000 / CORE_VIDEO_FPS)
 
-// --- Live preview (MJPEG HW — compatibile browser via multipart) ---
-#define CORE_LIVE_WIDTH     CORE_VIDEO_WIDTH
-#define CORE_LIVE_HEIGHT    CORE_VIDEO_HEIGHT
-#define CORE_LIVE_FPS       CORE_VIDEO_FPS
+// --- Live preview (MJPEG HW — anteprima browser, risoluzione più bassa della registrazione) ---
+#define CORE_LIVE_WIDTH     800
+#define CORE_LIVE_HEIGHT    640
+#define CORE_LIVE_FPS       10
 
 // --- SDMMC (Waveshare ESP32-P4-WIFI6-M, 4-bit SDIO) ---
 #define CORE_SD_PIN_CLK     GPIO_NUM_43
@@ -75,6 +76,8 @@ static_assert(CORE_GPIO_MODE_CFG == GPIO_NUM_29, "PIN CONGELATO: MODE deve resta
 
 // --- Timing ---
 #define CORE_D2_POST_DELAY_MS  5000   // attesa dopo pin stop prima del DONE (configurabile via web)
+#define CORE_D2_DELAY_MIN_MS      100  // minimo configurabile via web
+#define CORE_D2_DELAY_MAX_MS   600000  // massimo configurabile via web (10 min)
 #define CORE_REC_STOP_DEBOUNCE_MS  50 // pin stop LOW stabile per fermare (anti-glitch)
 #define CORE_REC_STOP_POLL_MS      10 // polling pin stop (timer dedicato, indip. dal frame-rate)
 #define CORE_TPL_DONE_PULSE_MS  1000  // DONE HIGH per impulso nel loop di spegnimento
@@ -125,7 +128,23 @@ static_assert(CORE_GPIO_MODE_CFG == GPIO_NUM_29, "PIN CONGELATO: MODE deve resta
 #define CORE_SD_PREP_TASK_STACK     4096
 #define CORE_SD_PREP_TASK_PRIO      3
 #define CORE_REC_ACQUIRE_TIMEOUT_MS 100
+#define CORE_SD_BOOT_RETRY_COUNT    5    // config: mount SD con più tentativi
+#define CORE_SD_BOOT_RETRY_MS       400
+#define CORE_CONFIG_SD_SETTLE_MS    200  // attesa post-WiFi prima di mount SD
+#define CORE_CONFIG_CAMERA_DELAY_MS 800  // attesa post-SD prima di init camera
+#define CORE_CONFIG_RECOVER_TMP_DELAY_MS 5000
+#define CORE_SD_MOUNT_MAX_FILES     8    // ridotto per mount con camera attiva
 
 // Credenziali web (user mm / pass GaPaMi) — hash SHA-256 di "mm:GaPaMi"
 // Generato offline; verifica in CoreAuth.cpp
 extern const uint8_t CORE_AUTH_SHA256[32];
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern int64_t g_core_boot_us;
+int64_t core_boot_elapsed_ms(void);
+void core_time_init(void);
+#ifdef __cplusplus
+}
+#endif

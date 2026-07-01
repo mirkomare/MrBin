@@ -73,7 +73,8 @@ bool core_settings_load(core_settings_t *out) {
     nvs_get_str(s_nvs, "wifi_pass", out->wifi_pass, &pass_len);
 
     uint32_t delay_ms = 0;
-    if (nvs_get_u32(s_nvs, "d2_delay", &delay_ms) == ESP_OK && delay_ms >= 1000 && delay_ms <= 600000) {
+    if (nvs_get_u32(s_nvs, "d2_delay", &delay_ms) == ESP_OK &&
+        delay_ms >= CORE_D2_DELAY_MIN_MS && delay_ms <= CORE_D2_DELAY_MAX_MS) {
         out->d2_post_delay_ms = delay_ms;
     }
 
@@ -110,7 +111,15 @@ bool core_settings_save(const core_settings_t *in) {
     if (err != ESP_OK) return false;
     err = nvs_set_u8(s_nvs, "rec_gpio_stop", in->rec_gpio_stop);
     if (err != ESP_OK) return false;
-    return nvs_commit(s_nvs) == ESP_OK;
+    err = nvs_commit(s_nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_commit fallito: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "Impostazioni salvate (id=%05lu delay=%lu ms stop=GPIO%u)",
+             (unsigned long)in->core_id, (unsigned long)in->d2_post_delay_ms,
+             (unsigned)in->rec_gpio_stop);
+    return true;
 }
 
 bool core_settings_ensure_id(core_settings_t *s) {

@@ -356,28 +356,12 @@ static esp_err_t handle_live_record_stop(httpd_req_t *req) {
 static esp_err_t handle_live_get(httpd_req_t *req) {
     if (!is_authed(req)) return send_redirect(req, "/");
 
-    bool cam_ok = core_video_init();
     char body[8192];
-    if (cam_ok) {
-        char tail[6144];
-        snprintf(tail, sizeof(tail), LIVE_PAGE_OK,
-                 CORE_LIVE_WIDTH, CORE_LIVE_HEIGHT, CORE_LIVE_FPS,
-                 CORE_VIDEO_WIDTH, CORE_VIDEO_HEIGHT, CORE_VIDEO_FPS);
-        snprintf(body, sizeof(body), "%s%s", LIVE_HTML_HEAD, tail);
-    } else {
-        snprintf(body, sizeof(body),
-            "%s"
-            "<div class='live-wrap'><div class='live-err'>"
-            "<strong>Camera non disponibile</strong><br><br>"
-            "Il sensore OV5647 non risponde su I2C (GPIO%d SDA, GPIO%d SCL).<br>"
-            "Verificare:<ul>"
-            "<li>Modulo camera collegato al connettore MIPI-CSI</li>"
-            "<li>Cavo FPC ben inserito</li>"
-            "<li>Camera compatibile OV5647</li>"
-            "</ul></div></div>"
-            "</body></html>",
-            LIVE_HTML_HEAD, CORE_CSI_I2C_SDA, CORE_CSI_I2C_SCL);
-    }
+    char tail[6144];
+    snprintf(tail, sizeof(tail), LIVE_PAGE_OK,
+             CORE_LIVE_WIDTH, CORE_LIVE_HEIGHT, CORE_LIVE_FPS,
+             CORE_VIDEO_WIDTH, CORE_VIDEO_HEIGHT, CORE_VIDEO_FPS);
+    snprintf(body, sizeof(body), "%s%s", LIVE_HTML_HEAD, tail);
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
@@ -472,6 +456,47 @@ static void url_decode(const char *in, char *out, size_t out_len) {
         }
     }
     out[o] = 0;
+}
+
+static int read_post_body(httpd_req_t *req, char *buf, size_t buf_len) {
+    if (!req || !buf || buf_len == 0) {
+        return -1;
+    }
+    size_t total = 0;
+    int remaining = req->content_len;
+    if (remaining < 0 || (size_t)remaining >= buf_len) {
+        remaining = (int)(buf_len - 1);
+    }
+    while (total < (size_t)remaining) {
+        int got = httpd_req_recv(req, buf + total, remaining - (int)total);
+        if (got <= 0) {
+            return got;
+        }
+        total += (size_t)got;
+    }
+    buf[total] = 0;
+    return (int)total;
+}
+
+static bool form_get_value(const char *body, const char *name, char *out, size_t out_len) {
+    if (!body || !name || !out || out_len == 0) {
+        return false;
+    }
+    char key[48];
+    snprintf(key, sizeof(key), "%s=", name);
+    const char *p = strstr(body, key);
+    if (!p) {
+        return false;
+    }
+    p += strlen(key);
+    char raw[192];
+    size_t i = 0;
+    while (*p && *p != '&' && i + 1 < sizeof(raw)) {
+        raw[i++] = *p++;
+    }
+    raw[i] = 0;
+    url_decode(raw, out, out_len);
+    return true;
 }
 
 static void url_encode_query(const char *in, char *out, size_t out_len) {
@@ -631,6 +656,15 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
                 snprintf(flash, sizeof(flash),
                     "<div class='alert err'>Formattazione SD fallita. Verificare la scheda e riprovare.</div>");
             }
+        } else if (httpd_query_key_value(query, "saved", msg, sizeof(msg)) == ESP_OK) {
+            if (strcmp(msg, "1") == 0) {
+                snprintf(flash, sizeof(flash),
+                    "<div class='alert ok'>Impostazioni salvate.</div>");
+            } else if (strcmp(msg, "0") == 0) {
+                snprintf(flash, sizeof(flash),
+                    "<div class='alert err'>Salvataggio fallito — verificare i valori (delay %u–%u ms).</div>",
+                    (unsigned)CORE_D2_DELAY_MIN_MS, (unsigned)CORE_D2_DELAY_MAX_MS);
+            }
         }
     }
 
@@ -660,7 +694,7 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
         "<form method='POST' action='/settings'>"
         "<label>CORE ID (5 cifre)</label><input name='core_id' value='%05lu'>"
         "%s"
-        "<label>Delay dopo pin stop (ms)</label><input name='d2_delay' value='%lu'>"
+        "<label>Delay dopo pin stop (ms, %u–%u)</label><input name='d2_delay' type='number' min='%u' max='%u' value='%lu'>"
         "<label>WiFi SSID</label><input name='wifi_ssid' value='%s'>"
         "<label>WiFi Password</label><input name='wifi_pass' type='password' value='%s'>"
         "<label>Chiave AES-128 (hex, sola lettura)</label><input readonly value='%s'>"
@@ -674,6 +708,10 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
         sd_info,
         s_settings ? (unsigned long)s_settings->core_id : 0UL,
         pin_cfg,
+        (unsigned)CORE_D2_DELAY_MIN_MS,
+        (unsigned)CORE_D2_DELAY_MAX_MS,
+        (unsigned)CORE_D2_DELAY_MIN_MS,
+        (unsigned)CORE_D2_DELAY_MAX_MS,
         s_settings ? (unsigned long)s_settings->d2_post_delay_ms : (unsigned long)CORE_D2_POST_DELAY_MS,
         s_settings ? s_settings->wifi_ssid : "",
         s_settings ? s_settings->wifi_pass : "",
@@ -686,25 +724,33 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
 
 static esp_err_t handle_settings_post(httpd_req_t *req) {
     if (!is_authed(req) || !s_settings) return send_redirect(req, "/");
-    char buf[768];
-    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (len <= 0) return ESP_FAIL;
-    buf[len] = 0;
+    char buf[1536];
+    if (read_post_body(req, buf, sizeof(buf)) <= 0) {
+        return send_redirect(req, "/settings?saved=0");
+    }
 
-    char id_s[16] = {0}, delay_s[16] = {0}, ssid[32] = {0}, pass[64] = {0};
-    char stop_s[8] = {0};
-    char *f;
-    if ((f = strstr(buf, "core_id="))) sscanf(f, "core_id=%15[^&]", id_s);
-    if ((f = strstr(buf, "d2_delay="))) sscanf(f, "d2_delay=%15[^&]", delay_s);
-    if ((f = strstr(buf, "rec_gpio_stop="))) sscanf(f, "rec_gpio_stop=%7[^&]", stop_s);
-    if ((f = strstr(buf, "wifi_ssid="))) sscanf(f, "wifi_ssid=%31[^&]", ssid);
-    if ((f = strstr(buf, "wifi_pass="))) sscanf(f, "wifi_pass=%63s", pass);
+    char id_s[16] = {0}, delay_s[16] = {0}, ssid[64] = {0}, pass[128] = {0}, stop_s[8] = {0};
+    form_get_value(buf, "core_id", id_s, sizeof(id_s));
+    form_get_value(buf, "d2_delay", delay_s, sizeof(delay_s));
+    form_get_value(buf, "rec_gpio_stop", stop_s, sizeof(stop_s));
+    form_get_value(buf, "wifi_ssid", ssid, sizeof(ssid));
+    form_get_value(buf, "wifi_pass", pass, sizeof(pass));
 
+    bool delay_ok = false;
     uint32_t id = (uint32_t)atoi(id_s);
-    if (id >= CORE_ID_MIN && id <= CORE_ID_MAX) s_settings->core_id = id;
+    if (id >= CORE_ID_MIN && id <= CORE_ID_MAX) {
+        s_settings->core_id = id;
+    }
     uint32_t delay = (uint32_t)atoi(delay_s);
-    if (delay >= 1000 && delay <= 600000) s_settings->d2_post_delay_ms = delay;
-    // Solo il pin di stop è configurabile; lo start è sempre "accensione" (nessun pin).
+    if (delay_s[0] == 0) {
+        delay_ok = true;
+    } else if (delay >= CORE_D2_DELAY_MIN_MS && delay <= CORE_D2_DELAY_MAX_MS) {
+        s_settings->d2_post_delay_ms = delay;
+        delay_ok = true;
+    } else {
+        ESP_LOGW(TAG, "Delay stop rifiutato: %lu ms (range %u–%u)",
+                 (unsigned long)delay, (unsigned)CORE_D2_DELAY_MIN_MS, (unsigned)CORE_D2_DELAY_MAX_MS);
+    }
     uint8_t stop_gpio = (uint8_t)atoi(stop_s);
     if (stop_gpio == (uint8_t)CORE_GPIO_D2_END || stop_gpio == (uint8_t)CORE_GPIO_D1_WAKE) {
         s_settings->rec_gpio_stop = stop_gpio;
@@ -714,9 +760,15 @@ static esp_err_t handle_settings_post(httpd_req_t *req) {
     }
     snprintf(s_settings->wifi_ssid, sizeof(s_settings->wifi_ssid), "%s", ssid);
     snprintf(s_settings->wifi_pass, sizeof(s_settings->wifi_pass), "%s", pass);
-    core_settings_save(s_settings);
-    core_gpio_set_rec_pins(s_settings->rec_gpio_start, s_settings->rec_gpio_stop);
-    return send_redirect(req, "/settings");
+
+    bool saved = core_settings_save(s_settings);
+    if (saved) {
+        core_gpio_set_rec_pins(s_settings->rec_gpio_start, s_settings->rec_gpio_stop);
+    }
+    if (!delay_ok && delay_s[0] != 0) {
+        return send_redirect(req, "/settings?saved=0");
+    }
+    return send_redirect(req, saved ? "/settings?saved=1" : "/settings?saved=0");
 }
 
 static esp_err_t handle_format_sd(httpd_req_t *req) {
@@ -1191,6 +1243,8 @@ bool core_web_start(core_settings_t *settings, core_web_wifi_mode_t wifi_mode,
     s_settings = settings;
     s_boot_error_page = false;
 
+    ESP_LOGI(TAG, "Boot config: WiFi → SD → Web (camera lazy su /live/stream)");
+
     if (wifi_mode == CORE_WEB_WIFI_AP_BOOT_ERROR) {
         if (!boot_error) return false;
         s_boot_error_page = true;
@@ -1222,7 +1276,9 @@ bool core_web_start(core_settings_t *settings, core_web_wifi_mode_t wifi_mode,
         }
     }
 
-    if (!core_sd_is_mounted() && !core_sd_init()) {
+    vTaskDelay(pdMS_TO_TICKS(CORE_CONFIG_SD_SETTLE_MS));
+
+    if (!core_sd_is_mounted() && !core_sd_init_boot()) {
         ESP_LOGW(TAG, "SD non montata — pagina video limitata");
     }
 
@@ -1240,6 +1296,7 @@ void core_web_stop(void) {
         httpd_stop(s_server);
         s_server = nullptr;
     }
+    core_video_deinit();
     core_status_led_set_mode(CORE_LED_OFF);
     s_boot_error_page = false;
 }

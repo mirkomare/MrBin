@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 bool core_sd_init(void);
+bool core_sd_init_boot(void);  // config: più retry e delay tra tentativi
 bool core_sd_is_mounted(void);
 bool core_sd_format(void);
 uint64_t core_sd_free_bytes(void);

@@ -39,7 +39,7 @@ bool core_live_start(void) {
     if (s_running) return true;
     s_abort_requested = false;
 
-    if (!core_video_init()) {
+    if (!core_video_prepare_for_stream()) {
         ESP_LOGE(TAG, "Video init fallita");
         return false;
     }
