@@ -9,13 +9,16 @@
 
 #include "encoder/esp_video_enc_default.h"
 #include "esp_capture.h"
+#include "esp_capture_advance.h"
 #include "esp_capture_sink.h"
+#include "esp_gmf_video_enc.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "impl/esp_capture_video_v4l2_src.h"
 #include "impl/mp4_muxer.h"
@@ -36,6 +39,7 @@ static const char *TAG = "core_recorder";
 #define H264_CODEC_SPEC_MAX     512
 #define REC_STATUS_LOG_MS       5000
 #define REC_DRAIN_TIMEOUT_MS    1000
+#define REC_FINAL_FLUSH_STOP_MS 2000   // max flush residuo (solo se stop non utente)
 #define MANUAL_REC_DONE_BIT     BIT0
 #define MANUAL_REC_TASK_STACK   12288
 #define MANUAL_REC_TASK_PRIO    5
@@ -83,17 +87,33 @@ typedef struct {
     esp_capture_sink_handle_t sink;
     esp_capture_video_src_if_t *vsrc;
     bool running;
-    int64_t pts_base_us;   // istante (esp_timer) del primo frame; PTS = tempo reale trascorso
+    uint32_t warmup_left;
+    uint32_t kept_frames;
+    uint32_t pts_epoch_ms;
 } recorder_capture_t;
 
-// PTS in ms basato sul tempo reale trascorso dal primo frame: la durata dell'MP4
-// coincide con la durata reale della registrazione, a prescindere dagli fps effettivi.
-static uint32_t recorder_next_pts_ms(recorder_capture_t *rc) {
-    int64_t now = esp_timer_get_time();
-    if (rc->pts_base_us < 0) {
-        rc->pts_base_us = now;
+static bool recorder_capture_warmup(recorder_capture_t *rc) {
+    if (rc->warmup_left > 0) {
+        rc->warmup_left--;
+        return true;
     }
-    return (uint32_t)((now - rc->pts_base_us) / 1000);
+    return false;
+}
+
+static uint32_t recorder_capture_next_pts(const recorder_capture_t *rc) {
+    return rc->pts_epoch_ms + rc->kept_frames * (uint32_t)CORE_VIDEO_FRAME_DUR_MS;
+}
+
+static bool recorder_frame_accept(recorder_capture_t *rc, uint32_t *out_pts_ms) {
+    if (recorder_capture_warmup(rc)) {
+        return false;
+    }
+    if (rc->kept_frames == 0) {
+        ESP_LOGI(TAG, "Warmup completato — registrazione utile da PTS 0");
+    }
+    *out_pts_ms = recorder_capture_next_pts(rc);
+    rc->kept_frames++;
+    return true;
 }
 
 typedef struct {
@@ -369,8 +389,9 @@ static bool    s_mux_key_set = false;
 typedef struct {
     int               fd;
     uint64_t          logical_pos;   // 0 = primo byte MP4
+    uint64_t          real_fd_pos;   // posizione fisica corrente su SD (evita lseek ridondanti)
     core_crypto_ctx_t crypto;
-    uint8_t          *scratch;       // buffer di cifratura (non muto il buffer del muxer)
+    uint8_t          *scratch;
     size_t            scratch_cap;
 } enc_writer_t;
 
@@ -389,8 +410,8 @@ static void *enc_writer_open(char *path) {
         free(w);
         return nullptr;
     }
-    w->scratch_cap = 16 * 1024;
-    w->scratch = (uint8_t *)heap_caps_malloc(w->scratch_cap, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    w->scratch_cap = 128 * 1024;
+    w->scratch = (uint8_t *)heap_caps_malloc(w->scratch_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!w->scratch) {
         w->scratch = (uint8_t *)malloc(w->scratch_cap);
     }
@@ -408,6 +429,7 @@ static void *enc_writer_open(char *path) {
         return nullptr;
     }
     w->logical_pos = 0;
+    w->real_fd_pos = CORE_CRYPTO_FILE_HEADER;
     return w;
 }
 
@@ -416,12 +438,16 @@ static int enc_writer_write(void *writer, void *buffer, int len) {
     if (!w || len <= 0) {
         return len == 0 ? 0 : -1;
     }
-    if (lseek(w->fd, (off_t)(w->logical_pos + CORE_CRYPTO_FILE_HEADER), SEEK_SET) < 0) {
-        return -1;
-    }
     const uint8_t *src = (const uint8_t *)buffer;
     int done = 0;
     while (done < len) {
+        uint64_t phys = w->logical_pos + CORE_CRYPTO_FILE_HEADER;
+        if (w->real_fd_pos != phys) {
+            if (lseek(w->fd, (off_t)phys, SEEK_SET) < 0) {
+                return done > 0 ? done : -1;
+            }
+            w->real_fd_pos = phys;
+        }
         size_t n = (size_t)(len - done);
         if (n > w->scratch_cap) n = w->scratch_cap;
         memcpy(w->scratch, src + done, n);
@@ -431,6 +457,7 @@ static int enc_writer_write(void *writer, void *buffer, int len) {
             return done > 0 ? done : -1;
         }
         w->logical_pos += (uint64_t)wr;
+        w->real_fd_pos += (uint64_t)wr;
         done += (int)wr;
         if ((size_t)wr < n) break;
     }
@@ -476,6 +503,30 @@ static bool recording_file_is_valid(const char *path) {
     return true;
 }
 
+static esp_capture_err_t rec_capture_pipeline_event(esp_capture_event_t event, void *ctx) {
+    if (event != ESP_CAPTURE_EVENT_VIDEO_PIPELINE_BUILT || !ctx) {
+        return ESP_CAPTURE_ERR_OK;
+    }
+    recorder_capture_t *rc = (recorder_capture_t *)ctx;
+    if (!rc->sink) {
+        return ESP_CAPTURE_ERR_OK;
+    }
+    esp_gmf_element_handle_t venc = nullptr;
+    esp_capture_err_t ret = esp_capture_sink_get_element_by_tag(
+        rc->sink, ESP_CAPTURE_STREAM_TYPE_VIDEO, "vid_enc", &venc);
+    if (ret != ESP_CAPTURE_ERR_OK || !venc) {
+        ESP_LOGW(TAG, "vid_enc non trovato — GOP/QP default");
+        return ESP_CAPTURE_ERR_OK;
+    }
+    esp_gmf_video_enc_set_bitrate(venc, CORE_VIDEO_BITRATE);
+    esp_gmf_video_enc_set_gop(venc, CORE_VIDEO_GOP);
+    esp_gmf_video_enc_set_qp(venc, CORE_VIDEO_QP_MIN, CORE_VIDEO_QP_MAX);
+    ESP_LOGI(TAG, "Encoder H264: %u bps, GOP=%u, QP [%u-%u]",
+             (unsigned)CORE_VIDEO_BITRATE, (unsigned)CORE_VIDEO_GOP,
+             (unsigned)CORE_VIDEO_QP_MIN, (unsigned)CORE_VIDEO_QP_MAX);
+    return ESP_CAPTURE_ERR_OK;
+}
+
 static void recorder_capture_cleanup(recorder_capture_t *rc) {
     if (!rc) {
         return;
@@ -494,7 +545,7 @@ static void recorder_capture_cleanup(recorder_capture_t *rc) {
 
 static bool recorder_capture_start_psram(recorder_capture_t *rc) {
     memset(rc, 0, sizeof(*rc));
-    rc->pts_base_us = -1;
+    rc->warmup_left = CORE_REC_WARMUP_DROP_FRAMES;
 
     if (!core_video_init()) {
         ESP_LOGE(TAG, "core_video_init fallita");
@@ -504,7 +555,7 @@ static bool recorder_capture_start_psram(recorder_capture_t *rc) {
     esp_video_enc_register_default();
 
     esp_capture_video_v4l2_src_cfg_t v4l2_cfg = {
-        .buf_count = 4,
+        .buf_count = CORE_V4L2_BUF_COUNT,
     };
     strncpy(v4l2_cfg.dev_name, CORE_VIDEO_DEV_NAME, sizeof(v4l2_cfg.dev_name) - 1);
 
@@ -551,6 +602,17 @@ static bool recorder_capture_start_psram(recorder_capture_t *rc) {
         return false;
     }
 
+    esp_capture_sink_set_bitrate(sink, ESP_CAPTURE_STREAM_TYPE_VIDEO, CORE_VIDEO_BITRATE);
+
+    rc->capture = capture;
+    rc->sink = sink;
+    rc->vsrc = vsrc;
+
+    err = esp_capture_set_event_cb(capture, rec_capture_pipeline_event, rc);
+    if (err != ESP_CAPTURE_ERR_OK) {
+        ESP_LOGW(TAG, "esp_capture_set_event_cb fallita: %d", (int)err);
+    }
+
     esp_capture_sink_enable(sink, ESP_CAPTURE_RUN_MODE_ALWAYS);
 
     err = esp_capture_start(capture);
@@ -562,12 +624,10 @@ static bool recorder_capture_start_psram(recorder_capture_t *rc) {
         return false;
     }
 
-    rc->capture = capture;
-    rc->sink = sink;
-    rc->vsrc = vsrc;
     rc->running = true;
 
-    ESP_LOGI(TAG, "Capture H264 %dx%d@%d avviato (buffer PSRAM)", CORE_VIDEO_WIDTH, CORE_VIDEO_HEIGHT, CORE_VIDEO_FPS);
+    ESP_LOGI(TAG, "Capture H264 %dx%d@%d avviato (buffer PSRAM, GOP=%u)",
+             CORE_VIDEO_WIDTH, CORE_VIDEO_HEIGHT, CORE_VIDEO_FPS, (unsigned)CORE_VIDEO_GOP);
     return true;
 }
 
@@ -579,20 +639,11 @@ static void recorder_capture_stop(recorder_capture_t *rc) {
     recorder_capture_cleanup(rc);
 }
 
-static bool recorder_muxer_feed_frame(recorder_muxer_t *muxer, const esp_capture_stream_frame_t *frame,
-                                      uint32_t pts_ms) {
-    esp_muxer_video_packet_t pkt = {
-        .data = frame->data,
-        .len = frame->size,
-        .pts = pts_ms,
-        .dts = pts_ms,
-        .key_frame = core_h264_is_idr_nal(frame->data, (uint32_t)frame->size),
-    };
-    return esp_muxer_add_video_packet(muxer->handle, muxer->stream_index, &pkt) == ESP_MUXER_ERR_OK;
-}
-
 static bool recorder_muxer_start_from_buffer(recorder_muxer_t *muxer, const char *tmp_path,
-                                             core_h264_buffer_t *buf) {
+                                             core_h264_buffer_t *buf, uint32_t *out_replayed) {
+    if (out_replayed) {
+        *out_replayed = 0;
+    }
     if (!muxer || !tmp_path || !buf || buf->frame_count == 0) {
         return false;
     }
@@ -620,7 +671,7 @@ static bool recorder_muxer_start_from_buffer(recorder_muxer_t *muxer, const char
             .no_key_frame_verify = true,
         },
         .display_in_order = true,
-        .moov_before_mdat = true,
+        .moov_before_mdat = false,
     };
 
     esp_muxer_handle_t handle = esp_muxer_open((esp_muxer_config_t *)&mp4_cfg, sizeof(mp4_cfg));
@@ -658,28 +709,50 @@ static bool recorder_muxer_start_from_buffer(recorder_muxer_t *muxer, const char
         return false;
     }
 
-    for (core_h264_frame_t *f = buf->head; f; f = f->next) {
-        esp_muxer_video_packet_t pkt = {
-            .data = f->data,
-            .len = (int)f->size,
-            .pts = f->pts_ms,
-            .dts = f->pts_ms,
-            .key_frame = core_h264_is_idr_nal(f->data, f->size),
-        };
-        if (esp_muxer_add_video_packet(handle, stream_index, &pkt) != ESP_MUXER_ERR_OK) {
-            esp_muxer_close(handle);
-            ESP_LOGE(TAG, "Replay buffer→SD fallita");
-            return false;
-        }
-    }
-
     muxer->handle = handle;
     muxer->stream_index = stream_index;
     muxer->active = true;
-    ESP_LOGI(TAG, "Mux MP4 su SD: %s (%lu frame replay, %lu bytes)", tmp_path,
-             (unsigned long)buf->frame_count, (unsigned long)buf->total_bytes);
-    core_h264_buffer_clear(buf);
+    ESP_LOGI(TAG, "Mux MP4 su SD: %s (buffer PSRAM %lu KB, ~%u s)",
+             tmp_path, (unsigned long)(core_h264_buffer_bytes_used(buf) / 1024),
+             (unsigned)core_h264_buffer_estimated_sec(buf));
     return true;
+}
+
+static void recorder_discard_psram_until_idr(core_h264_buffer_t *buf) {
+    if (!buf) {
+        return;
+    }
+    while (buf->head &&
+           !core_h264_is_idr_nal(core_h264_frame_data(buf, buf->head), buf->head->size)) {
+        core_h264_buffer_pop_head(buf);
+    }
+}
+
+static uint32_t recorder_drain_psram_to_muxer(recorder_muxer_t *muxer, core_h264_buffer_t *buf,
+                                              recorder_should_stop_fn_t should_stop) {
+    if (!muxer || !muxer->active || !buf) {
+        return 0;
+    }
+    uint32_t drained = 0;
+    while (buf->head) {
+        if (should_stop && should_stop()) {
+            break;
+        }
+        core_h264_frame_t *f = buf->head;
+        esp_muxer_video_packet_t pkt = {
+            .data = (uint8_t *)core_h264_frame_data(buf, f),
+            .len = (int)f->size,
+            .pts = f->pts_ms,
+            .dts = f->pts_ms,
+            .key_frame = core_h264_is_idr_nal(core_h264_frame_data(buf, f), f->size),
+        };
+        if (esp_muxer_add_video_packet(muxer->handle, muxer->stream_index, &pkt) != ESP_MUXER_ERR_OK) {
+            break;
+        }
+        core_h264_buffer_pop_head(buf);
+        drained++;
+    }
+    return drained;
 }
 
 static void recorder_muxer_close(recorder_muxer_t *muxer) {
@@ -690,32 +763,526 @@ static void recorder_muxer_close(recorder_muxer_t *muxer) {
     }
 }
 
-static bool recorder_process_frame(recorder_capture_t *capture, recorder_muxer_t *muxer,
-                                   core_h264_buffer_t *psram_buf, uint32_t *dropped_frames) {
+static bool recorder_ensure_muxer_open(recorder_muxer_t *muxer, const char *path,
+                                       core_h264_buffer_t *psram_buf);
+
+static bool recorder_muxer_write_packet(recorder_muxer_t *muxer, const uint8_t *data, uint32_t size,
+                                        uint32_t pts_ms, uint32_t *muxer_frames) {
+    if (!muxer || !muxer->active || !data || size == 0) {
+        return false;
+    }
+    esp_muxer_video_packet_t pkt = {
+        .data = (uint8_t *)data,
+        .len = (int)size,
+        .pts = pts_ms,
+        .dts = pts_ms,
+        .key_frame = core_h264_is_idr_nal(data, size),
+    };
+    if (esp_muxer_add_video_packet(muxer->handle, muxer->stream_index, &pkt) != ESP_MUXER_ERR_OK) {
+        return false;
+    }
+    if (muxer_frames) {
+        (*muxer_frames)++;
+    }
+    return true;
+}
+
+static bool recorder_stream_frame_to_muxer(recorder_muxer_t *muxer, const sd_prep_ctx_t *sd_ctx,
+                                             bool sd_ready, core_h264_buffer_t *staging,
+                                             bool *muxer_was_active, uint32_t *muxer_frames,
+                                             uint32_t *dropped_frames, const uint8_t *data,
+                                             uint32_t size, uint32_t pts_ms) {
+    if (!sd_ready || !sd_ctx->paths_ok) {
+        if (!core_h264_buffer_push(staging, pts_ms, data, size)) {
+            if (dropped_frames) {
+                (*dropped_frames)++;
+            }
+            ESP_LOGW(TAG, "Staging pieno (SD non pronta) — frame perso");
+            return false;
+        }
+        return true;
+    }
+
+    if (!muxer->active) {
+        if (!core_h264_buffer_push(staging, pts_ms, data, size)) {
+            if (dropped_frames) {
+                (*dropped_frames)++;
+            }
+            return false;
+        }
+        if (!core_h264_buffer_has_idr(staging)) {
+            return true;
+        }
+        if (!recorder_ensure_muxer_open(muxer, sd_ctx->final_path, staging)) {
+            ESP_LOGW(TAG, "Muxer non pronto (SPS/PPS/IDR)");
+            return false;
+        }
+        if (muxer_was_active) {
+            *muxer_was_active = true;
+        }
+        uint32_t n = recorder_drain_psram_to_muxer(muxer, staging, nullptr);
+        if (muxer_frames) {
+            *muxer_frames += n;
+        }
+        return true;
+    }
+
+    if (!recorder_muxer_write_packet(muxer, data, size, pts_ms, muxer_frames)) {
+        if (!core_h264_buffer_push(staging, pts_ms, data, size)) {
+            if (dropped_frames) {
+                (*dropped_frames)++;
+            }
+            ESP_LOGW(TAG, "Scrittura SD fallita e staging pieno — frame perso");
+        }
+        return false;
+    }
+
+    if (staging->frame_count > 0) {
+        uint32_t n = recorder_drain_psram_to_muxer(muxer, staging, nullptr);
+        if (muxer_frames) {
+            *muxer_frames += n;
+        }
+    }
+    return true;
+}
+
+static bool recorder_process_frame_stream(recorder_capture_t *capture, recorder_muxer_t *muxer,
+                                          const sd_prep_ctx_t *sd_ctx, bool sd_ready,
+                                          core_h264_buffer_t *staging, bool *muxer_was_active,
+                                          uint32_t *muxer_frames, uint32_t *dropped_frames,
+                                          bool no_wait) {
     esp_capture_stream_frame_t frame = {
         .stream_type = ESP_CAPTURE_STREAM_TYPE_VIDEO,
     };
-    esp_capture_err_t err = esp_capture_sink_acquire_frame(capture->sink, &frame, true);
+    esp_capture_err_t err = esp_capture_sink_acquire_frame(capture->sink, &frame, no_wait);
     if (err != ESP_CAPTURE_ERR_OK || !frame.data || frame.size <= 0) {
         return false;
     }
 
-    uint32_t pts_ms = recorder_next_pts_ms(capture);
-    bool ok = true;
-    if (!muxer->active) {
-        if (!core_h264_buffer_push(psram_buf, pts_ms, frame.data, (uint32_t)frame.size)) {
-            if (dropped_frames) {
-                (*dropped_frames)++;
-            }
-            ok = false;
+    uint32_t pts_ms = 0;
+    if (!recorder_frame_accept(capture, &pts_ms)) {
+        esp_capture_sink_release_frame(capture->sink, &frame);
+        return true;
+    }
+
+    (void)recorder_stream_frame_to_muxer(muxer, sd_ctx, sd_ready, staging, muxer_was_active,
+                                         muxer_frames, dropped_frames,
+                                         frame.data, (uint32_t)frame.size, pts_ms);
+    esp_capture_sink_release_frame(capture->sink, &frame);
+    return true;
+}
+
+static void recorder_drain_capture_to_muxer(recorder_capture_t *capture, recorder_muxer_t *muxer,
+                                            const sd_prep_ctx_t *sd_ctx, bool sd_ready,
+                                            core_h264_buffer_t *staging, bool *muxer_was_active,
+                                            uint32_t *muxer_frames, uint32_t *dropped_frames) {
+    (void)capture;
+    (void)muxer;
+    (void)sd_ctx;
+    (void)sd_ready;
+    (void)staging;
+    (void)muxer_was_active;
+    (void)muxer_frames;
+    (void)dropped_frames;
+}
+
+typedef struct {
+    recorder_capture_t       *capture;
+    recorder_muxer_t         *muxer;
+    sd_prep_ctx_t            *sd_ctx;
+    core_h264_buffer_t       *ring;
+    SemaphoreHandle_t         ring_mtx;
+    recorder_should_stop_fn_t should_stop;
+    volatile bool             capture_done;
+    volatile bool             sd_done;
+    volatile bool             sd_prep_done;
+    volatile bool             user_stop;   // stop D2/web: no drain encoder, flush ring
+    bool                     *muxer_was_active;
+    volatile uint32_t         muxer_frames;
+    volatile uint32_t         dropped_frames;
+    volatile uint32_t         producer_pts_max;
+    int64_t                   last_ring_warn_us;
+} rec_dual_job_ctx_t;
+
+static uint32_t rec_ring_fill_pct(rec_dual_job_ctx_t *ctx) {
+    uint32_t pct = 0;
+    xSemaphoreTake(ctx->ring_mtx, portMAX_DELAY);
+    pct = core_h264_buffer_fill_percent(ctx->ring);
+    xSemaphoreGive(ctx->ring_mtx);
+    return pct;
+}
+
+static bool rec_capture_push_ring(rec_dual_job_ctx_t *ctx, const uint8_t *data, uint32_t size,
+                                  uint32_t pts_ms) {
+    xSemaphoreTake(ctx->ring_mtx, portMAX_DELAY);
+    bool ok = core_h264_buffer_push(ctx->ring, pts_ms, data, size);
+    if (ok) {
+        ctx->producer_pts_max = pts_ms;
+    } else {
+        ctx->dropped_frames++;
+        int64_t now = esp_timer_get_time();
+        if (now - ctx->last_ring_warn_us >= 1000000) {
+            ctx->last_ring_warn_us = now;
+            ESP_LOGW(TAG, "Ring PSRAM pieno (%u%%) — frame perso",
+                     (unsigned)core_h264_buffer_fill_percent(ctx->ring));
         }
-    } else if (!recorder_muxer_feed_frame(muxer, &frame, pts_ms)) {
-        ESP_LOGW(TAG, "Scrittura frame su SD fallita");
-        ok = false;
+    }
+    xSemaphoreGive(ctx->ring_mtx);
+    return ok;
+}
+
+static bool rec_capture_one_frame(rec_dual_job_ctx_t *ctx, bool no_wait) {
+    recorder_capture_t *capture = ctx->capture;
+    if (!no_wait && rec_ring_fill_pct(ctx) >= CORE_RING_PAUSE_PCT) {
+        return false;
+    }
+
+    esp_capture_stream_frame_t frame = {
+        .stream_type = ESP_CAPTURE_STREAM_TYPE_VIDEO,
+    };
+    esp_capture_err_t err = esp_capture_sink_acquire_frame(capture->sink, &frame, no_wait);
+    if (err != ESP_CAPTURE_ERR_OK || !frame.data || frame.size <= 0) {
+        return false;
+    }
+
+    if (recorder_capture_warmup(capture)) {
+        esp_capture_sink_release_frame(capture->sink, &frame);
+        return true;
+    }
+
+    if (capture->kept_frames == 0) {
+        capture->pts_epoch_ms = frame.pts;
+        ESP_LOGI(TAG, "Warmup completato — registrazione utile da PTS 0");
+    }
+    uint32_t pts_ms = (frame.pts >= capture->pts_epoch_ms)
+        ? (frame.pts - capture->pts_epoch_ms) : 0;
+
+    bool pushed = false;
+    while (!ctx->should_stop() && !ctx->user_stop) {
+        if (rec_capture_push_ring(ctx, frame.data, (uint32_t)frame.size, pts_ms)) {
+            capture->kept_frames++;
+            pushed = true;
+            break;
+        }
+        if (no_wait) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(CORE_VIDEO_FRAME_DUR_MS / 4));
+    }
+    if (!pushed && no_wait) {
+        ctx->dropped_frames++;
     }
 
     esp_capture_sink_release_frame(capture->sink, &frame);
-    return ok;
+    return true;
+}
+
+static void rec_capture_job_task(void *arg) {
+    rec_dual_job_ctx_t *ctx = (rec_dual_job_ctx_t *)arg;
+    ESP_LOGI(TAG, "JOB1 capture→PSRAM (%dfps, sequenza H264 intatta)", CORE_VIDEO_FPS);
+    while (!ctx->should_stop()) {
+        if (rec_ring_fill_pct(ctx) >= CORE_RING_PAUSE_PCT) {
+            vTaskDelay(pdMS_TO_TICKS(CORE_VIDEO_FRAME_DUR_MS / 2));
+            continue;
+        }
+        if (!rec_capture_one_frame(ctx, false)) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+    // Stop D2/web: esci subito — il ring contiene già il video utile (lag SD ~2 s).
+    ESP_LOGI(TAG, "JOB1 capture terminato (%lu frame in ring)",
+             (unsigned long)ctx->capture->kept_frames);
+    ctx->capture_done = true;
+    vTaskDelete(nullptr);
+}
+
+static bool rec_sd_write_head_frame(rec_dual_job_ctx_t *ctx) {
+    xSemaphoreTake(ctx->ring_mtx, portMAX_DELAY);
+    if (!ctx->ring->head) {
+        xSemaphoreGive(ctx->ring_mtx);
+        return false;
+    }
+    core_h264_frame_t *f = ctx->ring->head;
+    uint32_t pts = f->pts_ms;
+    uint32_t size = f->size;
+    const uint8_t *data = core_h264_frame_data(ctx->ring, f);
+    xSemaphoreGive(ctx->ring_mtx);
+
+    if (!recorder_muxer_write_packet(ctx->muxer, data, size, pts, nullptr)) {
+        return false;
+    }
+
+    xSemaphoreTake(ctx->ring_mtx, portMAX_DELAY);
+    if (ctx->ring->head && ctx->ring->head->pts_ms == pts) {
+        core_h264_buffer_pop_head(ctx->ring);
+        ctx->muxer_frames++;
+    }
+    xSemaphoreGive(ctx->ring_mtx);
+    return true;
+}
+
+static bool rec_sd_may_write_head(rec_dual_job_ctx_t *ctx) {
+    if (!ctx->sd_prep_done || !ctx->sd_ctx->paths_ok) {
+        return false;
+    }
+    xSemaphoreTake(ctx->ring_mtx, portMAX_DELAY);
+    if (!ctx->ring->head) {
+        xSemaphoreGive(ctx->ring_mtx);
+        return false;
+    }
+    uint32_t head_pts = ctx->ring->head->pts_ms;
+    uint32_t tail_pts = ctx->producer_pts_max;
+    uint32_t ring_pct = core_h264_buffer_fill_percent(ctx->ring);
+    xSemaphoreGive(ctx->ring_mtx);
+
+    uint32_t lag_ms = CORE_REC_SD_LAG_MS;
+    if (ctx->should_stop() || ctx->user_stop) {
+        lag_ms = 0;
+    } else if (ring_pct >= CORE_REC_SD_LAG_URGENT_PCT) {
+        lag_ms = 0;
+    } else if (ring_pct >= CORE_REC_SD_LAG_CATCHUP_PCT) {
+        lag_ms = CORE_REC_SD_LAG_MS / 2;
+    }
+
+    if (!ctx->capture_done &&
+        (tail_pts < head_pts || (tail_pts - head_pts) < lag_ms)) {
+        return false;
+    }
+
+    if (!ctx->muxer->active) {
+        xSemaphoreTake(ctx->ring_mtx, portMAX_DELAY);
+        bool has_idr = core_h264_buffer_has_idr(ctx->ring);
+        xSemaphoreGive(ctx->ring_mtx);
+        if (!has_idr) {
+            return false;
+        }
+        if (!recorder_ensure_muxer_open(ctx->muxer, ctx->sd_ctx->final_path, ctx->ring)) {
+            return false;
+        }
+        if (ctx->muxer_was_active) {
+            *ctx->muxer_was_active = true;
+        }
+    }
+    return ctx->muxer->active;
+}
+
+static void rec_sd_job_task(void *arg) {
+    rec_dual_job_ctx_t *ctx = (rec_dual_job_ctx_t *)arg;
+    ESP_LOGI(TAG, "JOB2 PSRAM→SD (lag %u ms, burst %u)", (unsigned)CORE_REC_SD_LAG_MS,
+             (unsigned)CORE_REC_SD_BURST_FRAMES);
+
+    while (!ctx->sd_prep_done && !ctx->capture_done) {
+        if (ctx->sd_ctx->ev && (xEventGroupGetBits(ctx->sd_ctx->ev) & SD_PREP_DONE_BIT)) {
+            ctx->sd_prep_done = true;
+            ESP_LOGI(TAG, "JOB2 SD: percorso registrazione pronto");
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (!ctx->sd_prep_done && ctx->sd_ctx->ev) {
+        ctx->sd_prep_done = (xEventGroupGetBits(ctx->sd_ctx->ev) & SD_PREP_DONE_BIT) != 0;
+    }
+
+    bool muxer_logged = false;
+    for (;;) {
+        xSemaphoreTake(ctx->ring_mtx, portMAX_DELAY);
+        bool empty = (ctx->ring->head == nullptr);
+        bool done = ctx->capture_done;
+        xSemaphoreGive(ctx->ring_mtx);
+        if (done && empty) {
+            break;
+        }
+
+        if (!rec_sd_may_write_head(ctx)) {
+            vTaskDelay(pdMS_TO_TICKS((ctx->should_stop() || ctx->user_stop) ? 0 : 2));
+            continue;
+        }
+
+        if (!muxer_logged) {
+            muxer_logged = true;
+            ESP_LOGI(TAG, "JOB2 SD: scrittura MP4 %s", ctx->sd_ctx->final_path);
+        }
+
+        uint32_t burst_limit = (ctx->should_stop() || ctx->user_stop)
+            ? CORE_REC_SD_BURST_STOP : CORE_REC_SD_BURST_FRAMES;
+        uint32_t burst = 0;
+        for (uint32_t i = 0; i < burst_limit; i++) {
+            if (!rec_sd_may_write_head(ctx)) {
+                break;
+            }
+            if (!rec_sd_write_head_frame(ctx)) {
+                break;
+            }
+            burst++;
+        }
+        if (burst == 0) {
+            vTaskDelay(pdMS_TO_TICKS((ctx->should_stop() || ctx->user_stop) ? 0 : 2));
+        }
+    }
+
+    ESP_LOGI(TAG, "JOB2 SD terminato (%lu frame scritti)", (unsigned long)ctx->muxer_frames);
+    ctx->sd_done = true;
+    vTaskDelete(nullptr);
+}
+
+static bool recorder_process_frame_psram(recorder_capture_t *capture, core_h264_buffer_t *psram_buf,
+                                         uint32_t *dropped_frames, bool no_wait) {
+    esp_capture_stream_frame_t frame = {
+        .stream_type = ESP_CAPTURE_STREAM_TYPE_VIDEO,
+    };
+    esp_capture_err_t err = esp_capture_sink_acquire_frame(capture->sink, &frame, no_wait);
+    if (err != ESP_CAPTURE_ERR_OK || !frame.data || frame.size <= 0) {
+        return false;
+    }
+
+    uint32_t pts_ms = 0;
+    if (!recorder_frame_accept(capture, &pts_ms)) {
+        esp_capture_sink_release_frame(capture->sink, &frame);
+        return true;
+    }
+
+    if (!core_h264_buffer_push(psram_buf, pts_ms, frame.data, (uint32_t)frame.size)) {
+        if (dropped_frames) {
+            (*dropped_frames)++;
+        }
+    }
+
+    esp_capture_sink_release_frame(capture->sink, &frame);
+    return true;
+}
+
+static bool recorder_ensure_muxer_open(recorder_muxer_t *muxer, const char *path,
+                                       core_h264_buffer_t *psram_buf) {
+    if (muxer->active) {
+        return true;
+    }
+    if (!core_h264_buffer_has_idr(psram_buf)) {
+        return false;
+    }
+    return recorder_muxer_start_from_buffer(muxer, path, psram_buf, nullptr);
+}
+
+static bool recorder_flush_psram_to_sd(recorder_muxer_t *muxer, recorder_capture_t *capture,
+                                       const sd_prep_ctx_t *sd_ctx, core_h264_buffer_t *psram_buf,
+                                       bool capture_ok, bool sd_prep_done, bool *muxer_was_active,
+                                       uint32_t *dropped_frames, uint32_t *flush_cycles,
+                                       recorder_should_stop_fn_t should_stop, bool *capture_running) {
+    if (!muxer || !sd_ctx || !psram_buf || !sd_prep_done || !sd_ctx->paths_ok ||
+        psram_buf->frame_count == 0) {
+        return false;
+    }
+    if (!core_h264_buffer_should_flush(psram_buf)) {
+        return false;
+    }
+
+    if (!recorder_ensure_muxer_open(muxer, sd_ctx->final_path, psram_buf)) {
+        ESP_LOGW(TAG, "Flush SD: muxer non pronto (IDR/SPS mancanti)");
+        return false;
+    }
+    if (!muxer->active) {
+        return false;
+    }
+    if (muxer_was_active) {
+        *muxer_was_active = true;
+    }
+
+    if (*flush_cycles == 0) {
+        recorder_discard_psram_until_idr(psram_buf);
+    }
+
+    int64_t t0 = esp_timer_get_time();
+    uint32_t drained = 0;
+    uint32_t stall = 0;
+
+    ESP_LOGI(TAG, "Flush SD ciclo %lu: pool %u%% (%lu KB, %lu frame) → svuotamento...",
+             (unsigned long)(*flush_cycles + 1),
+             (unsigned)core_h264_buffer_fill_percent(psram_buf),
+             (unsigned long)(core_h264_buffer_bytes_used(psram_buf) / 1024),
+             (unsigned long)psram_buf->frame_count);
+
+    while (psram_buf->frame_count > 0) {
+        if (should_stop && should_stop()) {
+            ESP_LOGI(TAG, "Flush SD interrotto da stop (%lu frame già scritti, %lu in pool)",
+                     (unsigned long)drained, (unsigned long)psram_buf->frame_count);
+            if (capture && capture->running) {
+                recorder_capture_stop(capture);
+                if (capture_running) {
+                    *capture_running = false;
+                }
+            }
+            break;
+        }
+        uint32_t n = recorder_drain_psram_to_muxer(muxer, psram_buf, should_stop);
+        drained += n;
+        if (n == 0) {
+            if (++stall >= 400) {
+                ESP_LOGE(TAG, "Flush SD bloccato dopo %lu frame — memoria muxer/SD esaurita",
+                         (unsigned long)drained);
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(5));
+        } else {
+            stall = 0;
+        }
+    }
+
+    if (psram_buf->frame_count > 0) {
+        ESP_LOGW(TAG, "Flush incompleto: %lu frame rimasti in pool", (unsigned long)psram_buf->frame_count);
+    }
+
+    if (capture) {
+        capture->pts_epoch_ms += CORE_REC_FLUSH_PTS_GAP_MS;
+    }
+    (*flush_cycles)++;
+
+    ESP_LOGI(TAG, "Flush SD ciclo %lu completato: %lu frame in %lld ms (salto PTS +%u ms, pool 0%%)",
+             (unsigned long)*flush_cycles, (unsigned long)drained,
+             (long long)((esp_timer_get_time() - t0) / 1000),
+             (unsigned)CORE_REC_FLUSH_PTS_GAP_MS);
+    return true;
+}
+
+static bool recorder_final_psram_flush(recorder_muxer_t *muxer, recorder_capture_t *capture,
+                                       const sd_prep_ctx_t *sd_ctx, core_h264_buffer_t *psram_buf,
+                                       bool capture_ok, bool sd_prep_done, bool *muxer_was_active,
+                                       uint32_t *dropped_frames, bool stop_requested,
+                                       recorder_should_stop_fn_t should_stop) {
+    if (!psram_buf || psram_buf->frame_count == 0 || !sd_prep_done || !sd_ctx->paths_ok) {
+        return false;
+    }
+    if (!recorder_ensure_muxer_open(muxer, sd_ctx->final_path, psram_buf)) {
+        return false;
+    }
+    if (muxer_was_active && muxer->active) {
+        *muxer_was_active = true;
+    }
+
+    ESP_LOGI(TAG, "Flush finale PSRAM: %lu frame (~%u s)",
+             (unsigned long)psram_buf->frame_count,
+             (unsigned)core_h264_buffer_estimated_sec(psram_buf));
+
+    uint32_t flush_limit_ms = stop_requested ? REC_FINAL_FLUSH_STOP_MS
+                                             : (REC_DRAIN_TIMEOUT_MS * 3000U);
+    int64_t until = esp_timer_get_time() + ((int64_t)flush_limit_ms * 1000);
+    while (psram_buf->frame_count > 0 && esp_timer_get_time() < until) {
+        if (stop_requested) {
+            break;
+        }
+        if (recorder_drain_psram_to_muxer(muxer, psram_buf, nullptr) == 0) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+    if (stop_requested && psram_buf->frame_count > 0) {
+        ESP_LOGW(TAG, "Flush finale abbreviato da stop: %lu frame non scritti",
+                 (unsigned long)psram_buf->frame_count);
+    }
+    return psram_buf->frame_count == 0;
+}
+
+static bool recorder_process_frame(recorder_capture_t *capture, recorder_muxer_t *muxer,
+                                   core_h264_buffer_t *psram_buf, uint32_t *dropped_frames,
+                                   bool no_wait) {
+    (void)muxer;
+    return recorder_process_frame_psram(capture, psram_buf, dropped_frames, no_wait);
 }
 
 static void recorder_drain_capture(recorder_capture_t *capture, recorder_muxer_t *muxer,
@@ -733,30 +1300,33 @@ static void recorder_drain_capture(recorder_capture_t *capture, recorder_muxer_t
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
-        uint32_t pts_ms = recorder_next_pts_ms(capture);
-        if (!muxer->active) {
-            core_h264_buffer_push(psram_buf, pts_ms, frame.data, (uint32_t)frame.size);
-        } else if (!recorder_muxer_feed_frame(muxer, &frame, pts_ms)) {
-            ESP_LOGW(TAG, "Scrittura frame su SD fallita (drain)");
+        uint32_t pts_ms = 0;
+        if (!recorder_frame_accept(capture, &pts_ms)) {
+            esp_capture_sink_release_frame(capture->sink, &frame);
+            continue;
+        }
+        if (!core_h264_buffer_push(psram_buf, pts_ms, frame.data, (uint32_t)frame.size)) {
+            ESP_LOGW(TAG, "Pool pieno durante drain capture");
         }
         esp_capture_sink_release_frame(capture->sink, &frame);
     }
 }
 
-static bool recorder_try_sd_handoff(recorder_muxer_t *muxer, const sd_prep_ctx_t *sd_ctx,
-                                    core_h264_buffer_t *psram_buf, bool capture_ok,
-                                    bool sd_prep_done, bool *muxer_was_active) {
-    if (!muxer || !sd_ctx || !psram_buf || muxer->active || !sd_prep_done ||
-        !sd_ctx->paths_ok || !capture_ok || psram_buf->frame_count == 0) {
-        return false;
+static void recorder_drain_pending_capture(recorder_capture_t *capture, core_h264_buffer_t *psram_buf,
+                                           uint32_t *dropped_frames) {
+    if (!capture || !capture->running || !psram_buf) {
+        return;
     }
-    if (recorder_muxer_start_from_buffer(muxer, sd_ctx->final_path, psram_buf)) {
-        if (muxer_was_active) {
-            *muxer_was_active = true;
+    uint32_t recovered = 0;
+    for (;;) {
+        if (!recorder_process_frame_psram(capture, psram_buf, dropped_frames, true)) {
+            break;
         }
-        return true;
+        recovered++;
     }
-    return false;
+    if (recovered > 0) {
+        ESP_LOGI(TAG, "Recuperati %lu frame in coda capture", (unsigned long)recovered);
+    }
 }
 
 static void sd_prep_task(void *arg) {
@@ -844,7 +1414,7 @@ static bool recorder_finalize_save(const core_settings_t *settings, const sd_pre
         remove(sd_ctx->final_path);
     } else {
         saved = true;
-        ESP_LOGI(TAG, "File salvato cifrato (real-time): %s (%ld bytes)",
+        ESP_LOGI(TAG, "File salvato cifrato (dual-job PSRAM→SD): %s (%ld bytes)",
                  sd_ctx->final_path, (long)st.st_size);
         if (out_path && out_path_len > 0) {
             snprintf(out_path, out_path_len, "%s", sd_ctx->final_path);
@@ -889,99 +1459,168 @@ static bool recorder_run_core(const core_settings_t *settings, recorder_should_s
     }
 
     recorder_capture_t capture = {};
-    core_h264_buffer_t psram_buf;
-    core_h264_buffer_init(&psram_buf, CORE_H264_PSRAM_MAX_BYTES);
+    core_h264_buffer_t ring_buf = {};
+    SemaphoreHandle_t ring_mtx = xSemaphoreCreateMutex();
 
-    bool capture_ok = recorder_capture_start_psram(&capture);
-    if (!capture_ok) {
-        ESP_LOGE(TAG, "Capture non avviato");
-    } else {
-        core_status_led_set_mode(CORE_LED_RECORDING);
-        ESP_LOGI(TAG, "Registrazione PSRAM attiva in %lld ms (%lld ms da accensione)",
-                 (long long)((esp_timer_get_time() - boot_t0) / 1000),
-                 (long long)(esp_timer_get_time() / 1000));
-    }
-
+    bool sd_prep_done = false;
     xTaskCreate(sd_prep_task, "sd_prep", CORE_SD_PREP_TASK_STACK, &sd_ctx, CORE_SD_PREP_TASK_PRIO, nullptr);
 
-    recorder_muxer_t muxer = {};
-    bool sd_prep_done = false;
-    bool muxer_was_active = false;
-    uint32_t dropped_frames = 0;
-    int64_t last_status_log = esp_timer_get_time();
+    bool capture_ok = recorder_capture_start_psram(&capture);
+    if (!capture_ok || !ring_mtx) {
+        ESP_LOGE(TAG, "Capture/mutex non avviati — impossibile registrare");
+        xEventGroupWaitBits(sd_ctx.ev, SD_PREP_DONE_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
+        if (ring_mtx) {
+            vSemaphoreDelete(ring_mtx);
+        }
+        core_gpio_rec_stop_session_end();
+        vEventGroupDelete(sd_ctx.ev);
+        return false;
+    }
 
-    ESP_LOGI(TAG, "Registrazione attiva — stop: %s", stop_label ? stop_label : "?");
-    bool first_frame_logged = false;
+    if (!core_h264_buffer_init(&ring_buf)) {
+        ESP_LOGE(TAG, "Ring PSRAM non disponibile");
+        recorder_capture_stop(&capture);
+        vSemaphoreDelete(ring_mtx);
+        core_gpio_rec_stop_session_end();
+        vEventGroupDelete(sd_ctx.ev);
+        return false;
+    }
+
+    core_status_led_set_mode(CORE_LED_RECORDING);
+    ESP_LOGI(TAG, "Registrazione dual-job: %dfps → ring → SD (lag %u ms, catch-up automatico)",
+             CORE_VIDEO_FPS, (unsigned)CORE_REC_SD_LAG_MS);
+
+    recorder_muxer_t muxer = {};
+    bool muxer_was_active = false;
+
+    rec_dual_job_ctx_t job = {
+        .capture = &capture,
+        .muxer = &muxer,
+        .sd_ctx = &sd_ctx,
+        .ring = &ring_buf,
+        .ring_mtx = ring_mtx,
+        .should_stop = should_stop,
+        .muxer_was_active = &muxer_was_active,
+    };
+
+    TaskHandle_t cap_task = nullptr;
+    TaskHandle_t sd_task = nullptr;
+    if (xTaskCreate(rec_capture_job_task, "rec_cap", CORE_REC_CAPTURE_TASK_STACK, &job,
+                    CORE_REC_CAPTURE_TASK_PRIO, &cap_task) != pdPASS ||
+        xTaskCreate(rec_sd_job_task, "rec_sd", CORE_REC_SD_TASK_STACK, &job,
+                    CORE_REC_SD_TASK_PRIO, &sd_task) != pdPASS) {
+        ESP_LOGE(TAG, "Avvio task dual-job fallito");
+        recorder_capture_stop(&capture);
+        core_h264_buffer_deinit(&ring_buf);
+        vSemaphoreDelete(ring_mtx);
+        core_gpio_rec_stop_session_end();
+        vEventGroupDelete(sd_ctx.ev);
+        return false;
+    }
+
+    int64_t last_status_log = esp_timer_get_time();
+    int64_t rec_start_us = esp_timer_get_time();
+
     while (!should_stop()) {
         core_gpio_log_pin_edges();
-        if (capture_ok) {
-            recorder_process_frame(&capture, &muxer, &psram_buf, &dropped_frames);
-        }
-        if (!first_frame_logged && psram_buf.frame_count > 0) {
-            first_frame_logged = true;
-            ESP_LOGI(TAG, "Primo frame catturato a %lld ms da accensione",
-                     (long long)(esp_timer_get_time() / 1000));
-        }
 
         if (!sd_prep_done && (xEventGroupGetBits(sd_ctx.ev) & SD_PREP_DONE_BIT)) {
             sd_prep_done = true;
-        }
-
-        if (recorder_try_sd_handoff(&muxer, &sd_ctx, &psram_buf, capture_ok, sd_prep_done,
-                                    &muxer_was_active)) {
-            ESP_LOGI(TAG, "Passaggio PSRAM→SD in %lld ms",
-                     (long long)((esp_timer_get_time() - boot_t0) / 1000));
+            job.sd_prep_done = true;
         }
 
         int64_t now = esp_timer_get_time();
         if (now - last_status_log >= ((int64_t)REC_STATUS_LOG_MS * 1000)) {
             last_status_log = now;
-            s_manual_frame_count = psram_buf.frame_count;
-            ESP_LOGI(TAG, "Stato rec: buf=%lu frame/%lu B, sd=%d paths=%d mux=%d drop=%lu",
-                     (unsigned long)psram_buf.frame_count, (unsigned long)psram_buf.total_bytes,
-                     sd_ctx.sd_mounted, sd_ctx.paths_ok, muxer.active, (unsigned long)dropped_frames);
+            s_manual_frame_count = capture.kept_frames;
+            uint32_t rec_ms = (uint32_t)((now - rec_start_us) / 1000);
+            uint32_t ring_pct = 0;
+            xSemaphoreTake(ring_mtx, portMAX_DELAY);
+            ring_pct = core_h264_buffer_fill_percent(&ring_buf);
+            xSemaphoreGive(ring_mtx);
+            ESP_LOGI(TAG, "Stato rec: kept=%lu mux=%lu ring=%u%% fps~%.1f ~%u s drop=%lu",
+                     (unsigned long)capture.kept_frames,
+                     (unsigned long)job.muxer_frames,
+                     (unsigned)ring_pct,
+                     rec_ms > 0 ? (capture.kept_frames * 1000.0f) / (float)rec_ms : 0.0f,
+                     (unsigned)(capture.kept_frames * (uint32_t)CORE_VIDEO_FRAME_DUR_MS / 1000U),
+                     (unsigned long)job.dropped_frames);
         }
 
-        if (!capture_ok) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-        } else if (!muxer.active && psram_buf.frame_count == 0) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    ESP_LOGI(TAG, "Stop registrazione (%s) — %lld ms", stop_label ? stop_label : "?", 
-             (long long)((esp_timer_get_time() - boot_t0) / 1000));
+    ESP_LOGI(TAG, "Stop registrazione (%s) — fermo capture e flush SD", stop_label ? stop_label : "?");
+
+    const bool stopped_by_user = should_stop();
+    int64_t stop_at_us = stopped_by_user ? esp_timer_get_time() : 0;
+
+    core_status_led_notify_rec_stop();
+    job.user_stop = true;
+
+    const int cap_wait_iters = CORE_REC_STOP_CAPTURE_WAIT_MS / 10;
+    for (int i = 0; i < cap_wait_iters && !job.capture_done; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!job.capture_done) {
+        ESP_LOGW(TAG, "JOB1 capture: timeout uscita — stop pipeline forzato");
+    }
+
+    recorder_capture_stop(&capture);
+    if (stopped_by_user) {
+        ESP_LOGI(TAG, "Pipeline capture fermata (%lld ms da stop)",
+                 (long long)((esp_timer_get_time() - stop_at_us) / 1000));
+    }
+
+    const int sd_wait_iters = CORE_REC_STOP_SD_WAIT_MS / 10;
+    int64_t last_flush_log = esp_timer_get_time();
+    for (int i = 0; i < sd_wait_iters && !job.sd_done; ++i) {
+        int64_t now = esp_timer_get_time();
+        if (stopped_by_user && (now - last_flush_log) >= 1000000) {
+            last_flush_log = now;
+            uint32_t ring_pct = 0;
+            xSemaphoreTake(ring_mtx, portMAX_DELAY);
+            ring_pct = core_h264_buffer_fill_percent(&ring_buf);
+            xSemaphoreGive(ring_mtx);
+            ESP_LOGI(TAG, "Flush SD: ring=%u%% mux=%lu (%lld ms da stop)",
+                     (unsigned)ring_pct, (unsigned long)job.muxer_frames,
+                     (long long)((now - stop_at_us) / 1000));
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!job.sd_done) {
+        ESP_LOGW(TAG, "JOB2 SD: timeout drain — chiusura forzata");
+    }
+
+    if (!job.sd_prep_done) {
+        xEventGroupWaitBits(sd_ctx.ev, SD_PREP_DONE_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
+        job.sd_prep_done = true;
+    }
+
+    recorder_muxer_close(&muxer);
+    if (stopped_by_user) {
+        ESP_LOGI(TAG, "Muxer chiuso (%lld ms da stop)",
+                 (long long)((esp_timer_get_time() - stop_at_us) / 1000));
+    }
+    core_h264_buffer_deinit(&ring_buf);
+    vSemaphoreDelete(ring_mtx);
+    vEventGroupDelete(sd_ctx.ev);
 
     core_gpio_rec_stop_session_end();
 
-    if (!sd_prep_done) {
-        xEventGroupWaitBits(sd_ctx.ev, SD_PREP_DONE_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
-        sd_prep_done = true;
-    }
+    uint32_t timeline_sec = capture.kept_frames * (uint32_t)CORE_VIDEO_FRAME_DUR_MS / 1000U;
+    ESP_LOGI(TAG, "Registrazione chiusa: %lu catturati (~%u s), %lu su SD, drop=%lu",
+             (unsigned long)capture.kept_frames, (unsigned)timeline_sec,
+             (unsigned long)job.muxer_frames, (unsigned long)job.dropped_frames);
 
-    if (capture_ok) {
-        recorder_drain_capture(&capture, &muxer, &psram_buf, REC_DRAIN_TIMEOUT_MS);
+    if (stopped_by_user) {
+        ESP_LOGI(TAG, "Teardown stop utente in %lld ms",
+                 (long long)((esp_timer_get_time() - stop_at_us) / 1000));
     }
-
-    if (recorder_try_sd_handoff(&muxer, &sd_ctx, &psram_buf, capture_ok, sd_prep_done,
-                                &muxer_was_active)) {
-        ESP_LOGI(TAG, "Passaggio PSRAM→SD (ultima chance) in %lld ms",
-                 (long long)((esp_timer_get_time() - boot_t0) / 1000));
-        if (capture_ok) {
-            recorder_drain_capture(&capture, &muxer, &psram_buf, REC_DRAIN_TIMEOUT_MS);
-        }
-    }
-
-    if (capture_ok) {
-        recorder_capture_stop(&capture);
-    }
-    recorder_muxer_close(&muxer);
-    core_h264_buffer_clear(&psram_buf);
-    vEventGroupDelete(sd_ctx.ev);
 
     core_status_led_set_mode(CORE_LED_OFF);
 
-    return recorder_finalize_save(settings, &sd_ctx, capture_ok, muxer_was_active, dropped_frames,
+    return recorder_finalize_save(settings, &sd_ctx, true, muxer_was_active, job.dropped_frames,
                                   async_encrypt, out_path, out_path_len);
 }
 

@@ -1,5 +1,6 @@
 #include "CoreGPIO.h"
 #include "CoreConfig.h"
+#include "CoreStatusLed.h"
 
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -126,21 +127,66 @@ bool core_gpio_boot_was_pir_wake(void) {
     return false;
 }
 
-static esp_timer_handle_t s_stop_timer = nullptr;
 static volatile bool      s_rec_stop_latched = false;
 
-// Campiona il pin di stop ogni CORE_REC_STOP_POLL_MS in un timer dedicato: il
-// rilevamento è preciso e indipendente dalla velocità del loop di cattura.
-static void rec_stop_poll_cb(void *arg) {
-    (void)arg;
+static TaskHandle_t       s_stop_poll_task = nullptr;
+static volatile bool      s_stop_poll_run = false;
+
+static esp_timer_handle_t s_mode_timer = nullptr;
+static int64_t            s_mode_low_since = -1;
+static volatile bool      s_mode_exit_latched = false;
+static int                s_prev_mode_level = -1;
+
+static int s_prev_stop_level = -1;
+static int s_prev_d2_poll_level = -1;
+static int64_t s_d2_low_since = -1;
+static bool s_d2_led_notified = false;
+
+static void gpio_poll_stop_inputs(void) {
+    int stop_level = gpio_get_level(s_rec_stop_gpio);
+    if (s_prev_stop_level >= 0 && stop_level != s_prev_stop_level) {
+        ESP_LOGI(TAG, "STOP (GPIO%d) -> %s", (int)s_rec_stop_gpio, stop_level ? "HIGH" : "LOW");
+    }
+    s_prev_stop_level = stop_level;
+
+    int d2_level = gpio_get_level(CORE_GPIO_D2_END);
+    if (s_prev_d2_poll_level >= 0 && d2_level != s_prev_d2_poll_level) {
+        ESP_LOGI(TAG, "D2 (GPIO%d) -> %s", (int)CORE_GPIO_D2_END, d2_level ? "HIGH" : "LOW");
+    }
+    s_prev_d2_poll_level = d2_level;
+
+    if (core_gpio_is_mode_config()) {
+        s_rec_stop_low_since = -1;
+        s_d2_low_since = -1;
+        return;
+    }
+
+    int64_t now = esp_timer_get_time();
+
+    if (d2_level == 0) {
+        if (s_d2_low_since < 0) {
+            s_d2_low_since = now;
+        } else if (!s_d2_led_notified &&
+                   (now - s_d2_low_since) >= ((int64_t)CORE_REC_STOP_DEBOUNCE_MS * 1000)) {
+            s_d2_led_notified = true;
+            ESP_LOGI(TAG, "D2 (GPIO%d) LOW stabile %d ms — feedback LED (2 lampeggi)",
+                     (int)CORE_GPIO_D2_END, CORE_REC_STOP_DEBOUNCE_MS);
+            core_status_led_notify_d2_detected();
+        }
+    } else {
+        s_d2_low_since = -1;
+        s_d2_led_notified = false;
+    }
+
     if (s_rec_stop_latched) {
         return;
     }
-    if (!core_gpio_is_rec_stop_active()) {
-        s_rec_stop_low_since = -1;   // HIGH (o config): azzero il debounce
+
+    if (stop_level != 0) {
+        s_rec_stop_low_since = -1;
         return;
     }
-    int64_t now = esp_timer_get_time();
+
     if (s_rec_stop_low_since < 0) {
         s_rec_stop_low_since = now;
         return;
@@ -149,53 +195,130 @@ static void rec_stop_poll_cb(void *arg) {
         s_rec_stop_latched = true;
         ESP_LOGI(TAG, "Pin STOP (GPIO%d) LOW stabile %d ms -> STOP",
                  (int)s_rec_stop_gpio, CORE_REC_STOP_DEBOUNCE_MS);
+        core_status_led_notify_rec_stop();
     }
+}
+
+static void rec_stop_poll_task(void *arg) {
+    (void)arg;
+    while (s_stop_poll_run) {
+        gpio_poll_stop_inputs();
+        vTaskDelay(pdMS_TO_TICKS(CORE_REC_STOP_POLL_MS));
+    }
+    s_stop_poll_task = nullptr;
+    vTaskDelete(nullptr);
 }
 
 void core_gpio_rec_stop_session_begin(void) {
     s_rec_stop_low_since = -1;
     s_rec_stop_latched = false;
+    s_d2_low_since = -1;
+    s_d2_led_notified = false;
     s_prev_d1_level = -1;
     s_prev_d2_level = -1;
-    if (!s_stop_timer) {
-        esp_timer_create_args_t args = {
-            .callback = rec_stop_poll_cb,
-            .name = "recstop",
-        };
-        if (esp_timer_create(&args, &s_stop_timer) != ESP_OK) {
-            s_stop_timer = nullptr;
+    s_prev_stop_level = gpio_get_level(s_rec_stop_gpio);
+    s_prev_d2_poll_level = gpio_get_level(CORE_GPIO_D2_END);
+
+    s_stop_poll_run = true;
+    if (!s_stop_poll_task) {
+        if (xTaskCreate(rec_stop_poll_task, "gpio_stop", 3072, nullptr,
+                        CORE_GPIO_STOP_POLL_PRIO, &s_stop_poll_task) != pdPASS) {
+            ESP_LOGE(TAG, "Task polling STOP/D2 non avviato — fallback inline");
+            s_stop_poll_task = nullptr;
+            s_stop_poll_run = false;
         }
-    }
-    if (s_stop_timer) {
-        esp_timer_stop(s_stop_timer);  // no-op se non attivo
-        esp_timer_start_periodic(s_stop_timer, (uint64_t)CORE_REC_STOP_POLL_MS * 1000);
     }
 }
 
 void core_gpio_rec_stop_session_end(void) {
-    if (s_stop_timer) {
-        esp_timer_stop(s_stop_timer);
+    s_stop_poll_run = false;
+    for (int i = 0; i < 50 && s_stop_poll_task != nullptr; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
     s_rec_stop_low_since = -1;
     s_rec_stop_latched = false;
+    s_d2_low_since = -1;
+    s_d2_led_notified = false;
 }
 
 bool core_gpio_is_rec_stop_triggered(void) {
-    // Il debounce (50 ms LOW stabile) è valutato dal timer dedicato: qui leggo il latch.
-    if (s_stop_timer) {
-        return s_rec_stop_latched;
+    if (s_rec_stop_latched) {
+        return true;
     }
-    // Fallback (timer non disponibile): valutazione inline come prima.
-    if (!core_gpio_is_rec_stop_active()) {
-        s_rec_stop_low_since = -1;
+    if (!s_stop_poll_task) {
+        gpio_poll_stop_inputs();
+    }
+    return s_rec_stop_latched;
+}
+
+static void mode_exit_poll_cb(void *arg) {
+    (void)arg;
+    int level = gpio_get_level(CORE_GPIO_MODE_CFG);
+    if (s_prev_mode_level >= 0 && level != s_prev_mode_level) {
+        ESP_LOGI(TAG, "MODE (GPIO%d) -> %s", (int)CORE_GPIO_MODE_CFG, level ? "HIGH" : "LOW");
+    }
+    s_prev_mode_level = level;
+
+    if (s_mode_exit_latched) {
+        return;
+    }
+    if (core_gpio_is_mode_config()) {
+        s_mode_low_since = -1;
+        return;
+    }
+    int64_t now = esp_timer_get_time();
+    if (s_mode_low_since < 0) {
+        s_mode_low_since = now;
+        return;
+    }
+    if ((now - s_mode_low_since) >= ((int64_t)CORE_MODE_EXIT_DEBOUNCE_MS * 1000)) {
+        s_mode_exit_latched = true;
+        ESP_LOGI(TAG, "GPIO%d (MODE) LOW stabile %d ms -> esco config / DONE",
+                 (int)CORE_GPIO_MODE_CFG, CORE_MODE_EXIT_DEBOUNCE_MS);
+    }
+}
+
+void core_gpio_mode_exit_session_begin(void) {
+    s_mode_low_since = -1;
+    s_mode_exit_latched = false;
+    s_prev_mode_level = gpio_get_level(CORE_GPIO_MODE_CFG);
+    if (!s_mode_timer) {
+        esp_timer_create_args_t args = {
+            .callback = mode_exit_poll_cb,
+            .name = "modeexit",
+        };
+        if (esp_timer_create(&args, &s_mode_timer) != ESP_OK) {
+            s_mode_timer = nullptr;
+        }
+    }
+    if (s_mode_timer) {
+        esp_timer_stop(s_mode_timer);
+        esp_timer_start_periodic(s_mode_timer, (uint64_t)CORE_MODE_POLL_MS * 1000);
+    }
+}
+
+void core_gpio_mode_exit_session_end(void) {
+    if (s_mode_timer) {
+        esp_timer_stop(s_mode_timer);
+    }
+    s_mode_low_since = -1;
+    s_mode_exit_latched = false;
+}
+
+bool core_gpio_is_mode_exit_triggered(void) {
+    if (s_mode_timer) {
+        return s_mode_exit_latched;
+    }
+    if (core_gpio_is_mode_config()) {
+        s_mode_low_since = -1;
         return false;
     }
     int64_t now = esp_timer_get_time();
-    if (s_rec_stop_low_since < 0) {
-        s_rec_stop_low_since = now;
+    if (s_mode_low_since < 0) {
+        s_mode_low_since = now;
         return false;
     }
-    return (now - s_rec_stop_low_since) >= ((int64_t)CORE_REC_STOP_DEBOUNCE_MS * 1000);
+    return (now - s_mode_low_since) >= ((int64_t)CORE_MODE_EXIT_DEBOUNCE_MS * 1000);
 }
 
 bool core_gpio_is_mode_config(void) {

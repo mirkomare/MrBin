@@ -1232,6 +1232,10 @@ bool core_web_start(core_settings_t *settings, core_web_wifi_mode_t wifi_mode,
 }
 
 void core_web_stop(void) {
+    core_live_request_stop();
+    for (int i = 0; i < 100 && core_live_is_running(); ++i) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
     if (s_server) {
         httpd_stop(s_server);
         s_server = nullptr;

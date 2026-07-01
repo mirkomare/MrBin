@@ -6,6 +6,7 @@
 #include "CoreStatusLed.h"
 #include "CoreWeb.h"
 
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -39,8 +40,16 @@ static void disable_radio_for_recording(void) {
     ESP_LOGI(TAG, "Radio disabilitata per sessione registrazione");
 }
 
+static void recover_tmp_task(void *arg) {
+    core_settings_t *settings = (core_settings_t *)arg;
+    core_recorder_recover_tmp_files(settings);
+    vTaskDelete(nullptr);
+}
+
 static void run_config_mode(void) {
     ESP_LOGI(TAG, "GPIO%d HIGH — modalità configurazione (WiFi/Web)", CORE_GPIO_MODE_CFG);
+
+    core_gpio_mode_exit_session_begin();
 
     bool web_ok = false;
     if (g_settings.wifi_ssid[0] != 0) {
@@ -50,53 +59,34 @@ static void run_config_mode(void) {
     }
 
     if (web_ok) {
-        ESP_LOGI(TAG, "Web GUI attiva — config: monitoro GPIO%d (MODE). Se torna LOW spengo (DONE al TPL)", CORE_GPIO_MODE_CFG);
+        ESP_LOGI(TAG, "Web GUI attiva — GPIO%d LOW stabile → spegnimento (DONE TPL)", CORE_GPIO_MODE_CFG);
     } else {
-        ESP_LOGW(TAG, "Web GUI non avviata — config: monitoro GPIO%d (MODE) per lo spegnimento", CORE_GPIO_MODE_CFG);
+        ESP_LOGW(TAG, "Web GUI non avviata — GPIO%d LOW → spegnimento", CORE_GPIO_MODE_CFG);
     }
 
-    // Recupera registrazioni interrotte (.mp4.tmp orfani) lasciate da spegnimenti
-    // improvvisi: le valide vengono cifrate e finalizzate, le corrotte eliminate.
-    core_recorder_recover_tmp_files(&g_settings);
+    xTaskCreate(recover_tmp_task, "recov_tmp", 8192, &g_settings, 2, nullptr);
 
-    // Config: si resta qui finché GPIO29 (MODE) è HIGH. Se torna LOW (stabile per
-    // CORE_MODE_EXIT_DEBOUNCE_MS, anti-glitch) si esce subito e si spegne via DONE.
-    // Nessun altro pin (D1/D2/DONE) viene considerato in config.
     int64_t t0 = esp_timer_get_time();
-    int64_t mode_low_since = 0;
     int64_t last_beat = t0;
-    while (true) {
+    while (!core_gpio_is_mode_exit_triggered()) {
         vTaskDelay(pdMS_TO_TICKS(CORE_MODE_POLL_MS));
+
         int64_t now = esp_timer_get_time();
-
-        if (!core_gpio_is_mode_config()) {  // GPIO29 tornato LOW
-            if (mode_low_since == 0) {
-                mode_low_since = now;
-            } else if ((now - mode_low_since) >= (int64_t)CORE_MODE_EXIT_DEBOUNCE_MS * 1000) {
-                ESP_LOGI(TAG, "GPIO%d (MODE) LOW stabile — esco da config e avvio spegnimento (DONE)",
-                         CORE_GPIO_MODE_CFG);
-                break;
-            }
-        } else {
-            mode_low_since = 0;  // ancora HIGH: azzero il debounce
-        }
-
-        if ((now - last_beat) >= 5000000) {  // heartbeat ogni 5 s
+        if ((now - last_beat) >= 5000000) {
             last_beat = now;
             uint32_t up_s = (uint32_t)((now - t0) / 1000000);
-            ESP_LOGI(TAG, "Config attiva: uptime %lu s (MODE=HIGH)", (unsigned long)up_s);
+            ESP_LOGI(TAG, "Config attiva: uptime %lu s (MODE=%d)",
+                     (unsigned long)up_s, gpio_get_level(CORE_GPIO_MODE_CFG));
         }
     }
 
-    // MODE è tornato LOW: spegnimento immediato via DONE pulsato (nessun ritardo).
+    ESP_LOGI(TAG, "Uscita config — stop Web/Live e loop DONE TPL");
     core_web_stop();
+    core_gpio_mode_exit_session_end();
     core_gpio_hold_tpl_done(0);
 }
 
 static void run_pir_mode(void) {
-    // MODE LOW = operatività normale: registra SEMPRE e subito (TPL5110 manual).
-    // Non si pretende D1 LOW al boot: con accensione manuale o PIR già rilasciato
-    // il pin può essere HIGH quando arriva app_main. Lo stop avviene sul pin stop (D2).
     core_gpio_boot_snapshot_t snap;
     core_gpio_get_boot_snapshot(&snap);
     ESP_LOGI(TAG, "Operatività normale — registrazione (boot D1=%d D2=%d MODE=%d, start GPIO%d stop GPIO%d)",
@@ -126,7 +116,7 @@ extern "C" void app_main(void) {
     core_gpio_save_boot_snapshot();
     core_status_led_init();
     core_gpio_set_rec_pins(g_settings.rec_gpio_start, g_settings.rec_gpio_stop);
-    core_encfs_register();  // VFS cifrante /enc: registrazioni MP4 cifrate on-the-fly
+    core_encfs_register();
 
     setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
     tzset();

@@ -4,6 +4,91 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 **Versioning:** se non indicato diversamente, incrementare sempre l’**ultimo numero** (patch: `0.3.0` → `0.3.1`). Minor/major solo su richiesta esplicita.
 
+## [0.5.1] - 2026-07-01 — Patch: dual-job PSRAM, qualità H264, filesystem/chiusura MP4, stop D2/LED
+
+**Commit:** *(compilato al tag — vedi riga sotto dopo push)*  
+**Data/ora release:** 2026-07-01 (Europe/Rome)  
+**Tag:** `v0.5.1`  
+**Stato:** **Stable** (patch su 0.5.0) — registrazione evento completa PIR→D2, qualità video utilizzabile, spegnimento con feedback LED corretto, pipeline file cifrati consolidata.  
+**Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
+**Versione firmware:** `src/mrbin_core/VERSION` → `0.5.1`
+
+### Contesto
+
+Dopo la 0.5.0 (1080p nativo + writer cifrante muxer) i test sul campo hanno evidenziato: video troncato o illeggibile (macroblocchi), ring PSRAM che overflowava, spegnimento percepito come “1 minuto con LED acceso”, uscita config MODE bloccata. Questa patch riprogetta la registrazione in **dual-job** (capture→PSRAM, SD ritardato), elimina lo scarto post-encode H264, consolida filesystem/chiusura file e allinea GPIO/LED allo stop D2.
+
+### Aggiunto
+
+#### Architettura dual-job registrazione (`CoreRecorder`, `CoreH264Buffer`)
+- **JOB1** `rec_cap` (prio 5): cattura H264 → ring PSRAM (~95% SPIRAM libera post-pipeline, fino a ~18 MB).
+- **JOB2** `rec_sd` (prio 7): drain ring → muxer MP4 su SD con **lag 2 s** (catch-up automatico se ring >50%/75%).
+- Ring buffer lock-free con mutex: push/pop head, estrazione SPS/PPS per apertura muxer, stima durata e fill %.
+- Backpressure JOB1 se ring >65%: **non acquisisce** frame (mai drop H264 post-encode).
+- Su stop utente (D2/web): lag 0, burst fino a **256 frame/ciclo**, stop pipeline capture **prima** del flush SD.
+
+#### Qualità video H264 (`CoreConfig`, `CoreRecorder`, `sdkconfig.defaults`)
+- Risoluzione **1280×960 binning** OV5647 (`CONFIG_CAMERA_OV5647_MIPI_RAW10_1280X960_BINNING_45FPS`).
+- **12 fps** via `vid_fps_cvt` in pipeline (non decimazione post-encode).
+- Encoder: **7 Mbps**, GOP **24**, QP **20–36** (`esp_capture_sink_get_element_by_tag` → `vid_enc`).
+- PTS da `frame.pts` capture (epoch al primo frame utile post-warmup).
+
+#### Filesystem e scrittura file cifrati
+
+##### Writer cifrante dedicato del muxer (`enc_writer_*` in `CoreRecorder.cpp`)
+- **`enc_writer_open`**: `open(path, O_WRONLY|O_CREAT|O_TRUNC)` sul **path reale** `/sdcard/.../*.mp4` (non path temporaneo `.tmp`, non VFS `/enc` per il muxer attivo).
+- Scrive subito header fisico **`[MRBI][IV]`** (20 byte) + posizione logica MP4 a offset 0.
+- **`enc_writer_write`**: copia su scratch PSRAM (128 KB), `core_crypto_crypt_at` a offset logico, `write()` con tracking `logical_pos` / `real_fd_pos` e `lseek` solo se necessario (compatibile riscrittura `moov`).
+- **`enc_writer_seek`**: aggiorna solo `logical_pos` (seek logico MP4; il muxer riscrive `moov` a fine file).
+- **`enc_writer_close`**: `close(fd)` → `core_crypto_deinit_ctx` → free scratch → free struct. **Un solo close** chiude il file definitivo già cifrato.
+
+##### Chiusura MP4 e finalize (`recorder_muxer_close`, `recorder_finalize_save`)
+- Sequenza stop: latch D2 → ferma JOB1 → `recorder_capture_stop()` → JOB2 svuota ring → **`recorder_muxer_close()`** (`esp_muxer_close` con `moov_before_mdat = false`, cache muxer 768 KB).
+- **Nessun secondo passaggio** di cifratura: `recorder_finalize_save` fa solo `stat()` + verifica dimensione ≥ header crypto + minimo MP4.
+- `encrypt_mp4_file()` **mantenuto** solo per recupero `.mp4.tmp` orfani (registrazioni pre-VFS interrotte): scrittura atomica su `.part` + `rename` a `.mp4`.
+
+##### VFS cifrante `/enc` (`CoreEncFs`)
+- Modulo registrato all'avvio (`core_encfs_register` in `mrbin_core_main.cpp`): mount logico `/enc` → path reale SD con stesso header MRBI e CTR.
+- **Non usato dal muxer dual-job** (sostituito da `enc_writer_*`); resta disponibile per altri usi e coerenza formato on-disk.
+
+##### Crypto offset arbitrario (`CoreCrypto`)
+- `core_crypto_crypt_at` per cifratura/decifratura CTR a offset logico qualsiasi (seek muxer + stream web).
+
+#### GPIO, stop e LED (`CoreGPIO`, `CoreStatusLed`)
+- Polling STOP/D2 su **task FreeRTOS** `gpio_stop` (prio 8), non `esp_timer` (fix uscita config MODE).
+- D2 LOW → **2 lampeggi** GPIO52 (`CORE_LED_D2_DETECT`); stop latched → **`CORE_LED_SAVING`** (100 ms ON / 400 ms OFF) invece di tornare RECORDING acceso fisso durante flush SD.
+- `core_status_led_notify_rec_stop()` al latch STOP e all’inizio teardown recorder.
+- Uscita config: timer MODE + `core_gpio_hold_tpl_done(0)` dopo stop Web.
+
+#### Web (`CoreWeb`)
+- `core_web_stop()`: ferma live stream **prima** di `httpd_stop()` (evita hang spegnimento config).
+
+### Modificato
+- Video: da 1920×1080@30 a **1280×960@12** (compromesso qualità/throughput SD su P4).
+- `CoreRecorder`: da loop single-thread + buffer fisso a dual-job con ring dinamico PSRAM.
+- Teardown stop: **non** drain encoder post-stop (evita riempire ring mentre SD svuota); `recorder_capture_stop` subito dopo uscita JOB1.
+- `core_gpio_rec_stop_session_end()` spostato **dopo** teardown recorder (stop latch valido fino a fine flush).
+
+### Corretto
+- **Macroblocchi / numeri illeggibili**: causati dallo **scarto di frame H264** post-encode (GOP rotto); rimosso pacing/drain che chiamava `release_frame` senza mux.
+- **Video troncato**: ring overflow; dual-job + backpressure + catch-up SD lag.
+- **LED acceso 1 minuto post-D2**: ripristinava `CORE_LED_RECORDING` dopo blink; ora `CORE_LED_SAVING` fino a chiusura muxer.
+- **MODE config non spegneva**: `esp_timer` callback → task FreeRTOS per polling GPIO29.
+- **Stop percepito lento**: capture continuava a riempire ring durante flush; pipeline fermata prima del drain SD.
+
+### Note tecniche — filesystem e durata file
+| Fase | File su SD | Stato |
+|------|------------|--------|
+| Durante registrazione | `/sdcard/YYYYMMDD/COREID_*.mp4` | Crescita incrementale cifrata (header MRBI già a offset 0) |
+| `esp_muxer_close` | stesso path | Scrittura/aggiornamento box `moov` (seek logico via `enc_writer_seek`) |
+| Fine sessione | stesso path | File completo e valido; nessun rename da `.tmp` |
+| Orfani legacy | `*.mp4.tmp` | Recupero via `encrypt_mp4_file` → `.part` → rename |
+
+### Compatibilità
+- Formato on-disk invariato: **`[MRBI][IV]` + AES-128-CTR**; download/decrypt web compatibile.
+- File prodotti dalla 0.5.0 (1080p) e 0.5.1 (1280×960) usano lo stesso header e player web.
+
+---
+
 ## [0.5.0] - 2026-07-01 — Minor STABLE: video 1080p nativo, cifratura real-time affidabile, PTS a tempo reale, stop pin robusto
 
 **Commit:** `0a52ab573cc716d636b8bc9b88972b268c8fa0b1`  

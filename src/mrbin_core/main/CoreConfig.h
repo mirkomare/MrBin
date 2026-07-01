@@ -30,15 +30,29 @@ static_assert(CORE_GPIO_MODE_CFG == GPIO_NUM_29, "PIN CONGELATO: MODE deve resta
 #define CORE_STATUS_LED_STA_BLINK_MS    500
 #define CORE_STATUS_LED_STA_BLINK_COUNT 3
 #define CORE_STATUS_LED_STA_PULSE_MS    150
+#define CORE_STATUS_LED_D2_BLINK_COUNT  2
+#define CORE_STATUS_LED_D2_PULSE_MS     150
+#define CORE_STATUS_LED_D2_GAP_MS       200
+#define CORE_STATUS_LED_SAVING_ON_MS    100
+#define CORE_STATUS_LED_SAVING_OFF_MS   400
+#define CORE_GPIO_STOP_POLL_PRIO        8   // sopra capture/recorder: D2 sempre campionato
 
 // --- Rete / Web ---
 #define CORE_WEB_PORT       1510
 
 // --- Video ---
-#define CORE_VIDEO_WIDTH    1920
-#define CORE_VIDEO_HEIGHT   1080
-#define CORE_VIDEO_FPS      30
+// 1280×960 binning OV5647 (RAW10 @45fps sensore) — compromesso qualità/fluidità vs 1080p.
+#define CORE_VIDEO_WIDTH    1280
+#define CORE_VIDEO_HEIGHT   960
+#define CORE_VIDEO_FPS      12    // vid_fps_cvt in pipeline — non scartare frame H264 post-encode
+#define CORE_VIDEO_BITRATE  7000000   // 7 Mbps — SXGA con motion
+#define CORE_VIDEO_GOP      24        // IDR ogni ~2 s @ 12 fps
+#define CORE_VIDEO_QP_MIN   20
+#define CORE_VIDEO_QP_MAX   36
 #define CORE_VIDEO_DEV_NAME "/dev/video0"
+#define CORE_REC_WARMUP_DROP_FRAMES   8
+#define CORE_REC_SD_WAIT_MS           0    // capture subito; SD monta in parallelo
+#define CORE_VIDEO_FRAME_DUR_MS    (1000 / CORE_VIDEO_FPS)
 
 // --- Live preview (MJPEG HW — compatibile browser via multipart) ---
 #define CORE_LIVE_WIDTH     CORE_VIDEO_WIDTH
@@ -84,9 +98,27 @@ static_assert(CORE_GPIO_MODE_CFG == GPIO_NUM_29, "PIN CONGELATO: MODE deve resta
 // --- SD spazio minimo per nuova registrazione (bytes) ---
 #define CORE_SD_MIN_FREE_BYTES  (50ULL * 1024ULL * 1024ULL)
 
-// --- Registrazione fast-boot (buffer PSRAM pre-SD + mux MP4 su SD) ---
-#define CORE_H264_PSRAM_MAX_BYTES   (12U * 1024U * 1024U)   // ~12 MB in PSRAM
-#define CORE_MUXER_RAM_CACHE_BYTES  (512U * 1024U)          // cache muxer → meno flush SD
+// --- Registrazione dual-job: capture→PSRAM (JOB1) + PSRAM→SD ritardato (JOB2) ---
+#define CORE_REC_SD_LAG_MS            2000  // lag normale JOB2 (catch-up se ring pieno)
+#define CORE_REC_SD_LAG_CATCHUP_PCT   50    // sotto questo % lag, lag dimezzato
+#define CORE_REC_SD_LAG_URGENT_PCT    75    // sopra: JOB2 scrive subito (lag 0)
+#define CORE_REC_SD_BURST_FRAMES      32    // frame per ciclo JOB2
+#define CORE_REC_SD_BURST_STOP        256   // burst massimo su stop utente (D2/web)
+#define CORE_REC_STOP_CAPTURE_WAIT_MS 3000  // attesa uscita JOB1 dopo stop
+#define CORE_REC_STOP_SD_WAIT_MS      45000 // attesa flush ring→SD dopo stop
+#define CORE_RING_PAUSE_PCT           65    // JOB1 attende prima di acquire (mai drop frame H264)
+#define CORE_REC_CAPTURE_TASK_STACK   8192
+#define CORE_REC_SD_TASK_STACK        8192
+#define CORE_REC_CAPTURE_TASK_PRIO    5
+#define CORE_REC_SD_TASK_PRIO         7     // SD priorità alta: svuota ring
+#define CORE_H264_PSRAM_USE_PCT       95   // ring PSRAM post-pipeline
+#define CORE_H264_PSRAM_FLUSH_PCT     95   // legacy flush path (non usato in dual-job)
+#define CORE_H264_PSRAM_MIN_BYTES     (2U * 1024U * 1024U)
+#define CORE_PSRAM_TAIL_RESERVE_BYTES (512U * 1024U)
+#define CORE_MUXER_RAM_CACHE_BYTES  (768U * 1024U)   // cache muxer — batch write SD
+#define CORE_PSRAM_FLUSH_RESERVE_BYTES (CORE_MUXER_RAM_CACHE_BYTES + 128U * 1024U)
+#define CORE_REC_FLUSH_PTS_GAP_MS     500
+#define CORE_V4L2_BUF_COUNT         8
 #define CORE_REC_ENCRYPT_IO_BYTES   (512U * 1024U)          // buffer cifratura (heap, non static)
 #define CORE_CRYPTO_STREAM_IO_BYTES (64U * 1024U)           // buffer decifratura stream web
 #define CORE_SD_FILE_BUF_BYTES      (32U * 1024U)           // setvbuf FILE durante I/O SD

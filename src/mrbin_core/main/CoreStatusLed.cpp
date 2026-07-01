@@ -12,6 +12,8 @@ static const char *TAG = "core_status_led";
 static TaskHandle_t s_led_task = nullptr;
 static SemaphoreHandle_t s_mode_mtx = nullptr;
 static core_status_led_mode_t s_mode = CORE_LED_OFF;
+static core_status_led_mode_t s_restore_mode = CORE_LED_OFF;
+static volatile bool s_rec_stop_pending = false;
 static const int s_off_level = CORE_STATUS_LED_ON_LEVEL ? 0 : 1;
 
 static void led_write(int level) {
@@ -73,6 +75,34 @@ static void led_task(void *) {
             vTaskDelay(pdMS_TO_TICKS(200));
             break;
 
+        case CORE_LED_D2_DETECT: {
+            core_status_led_mode_t restore = CORE_LED_OFF;
+            if (s_mode_mtx && xSemaphoreTake(s_mode_mtx, portMAX_DELAY) == pdTRUE) {
+                restore = s_rec_stop_pending ? CORE_LED_SAVING : s_restore_mode;
+                xSemaphoreGive(s_mode_mtx);
+            }
+            for (int i = 0; i < CORE_STATUS_LED_D2_BLINK_COUNT; ++i) {
+                led_pulse_ms(CORE_STATUS_LED_D2_PULSE_MS);
+                if (i + 1 < CORE_STATUS_LED_D2_BLINK_COUNT) {
+                    vTaskDelay(pdMS_TO_TICKS(CORE_STATUS_LED_D2_GAP_MS));
+                }
+            }
+            core_status_led_mode_t final_mode = s_rec_stop_pending ? CORE_LED_SAVING : restore;
+            led_set_mode_locked(final_mode);
+            if (final_mode == CORE_LED_RECORDING) {
+                led_write(CORE_STATUS_LED_ON_LEVEL);
+            } else {
+                led_write(s_off_level);
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+            break;
+        }
+
+        case CORE_LED_SAVING:
+            led_pulse_ms(CORE_STATUS_LED_SAVING_ON_MS);
+            vTaskDelay(pdMS_TO_TICKS(CORE_STATUS_LED_SAVING_OFF_MS));
+            break;
+
         case CORE_LED_OFF:
         default:
             led_write(s_off_level);
@@ -123,6 +153,9 @@ void core_status_led_set_mode(core_status_led_mode_t mode) {
         return;
     }
     if (xSemaphoreTake(s_mode_mtx, portMAX_DELAY) == pdTRUE) {
+        if (mode == CORE_LED_RECORDING) {
+            s_rec_stop_pending = false;
+        }
         s_mode = mode;
         xSemaphoreGive(s_mode_mtx);
     }
@@ -130,4 +163,31 @@ void core_status_led_set_mode(core_status_led_mode_t mode) {
 
 void core_status_led_notify_sta_connected(void) {
     core_status_led_set_mode(CORE_LED_STA_CONNECTED);
+}
+
+void core_status_led_notify_d2_detected(void) {
+    if (!s_mode_mtx) {
+        return;
+    }
+    if (xSemaphoreTake(s_mode_mtx, portMAX_DELAY) == pdTRUE) {
+        if (s_mode != CORE_LED_D2_DETECT) {
+            s_restore_mode = s_mode;
+            s_mode = CORE_LED_D2_DETECT;
+        }
+        xSemaphoreGive(s_mode_mtx);
+    }
+}
+
+void core_status_led_notify_rec_stop(void) {
+    s_rec_stop_pending = true;
+    if (!s_mode_mtx) {
+        led_write(s_off_level);
+        return;
+    }
+    if (xSemaphoreTake(s_mode_mtx, portMAX_DELAY) == pdTRUE) {
+        if (s_mode == CORE_LED_RECORDING || s_mode == CORE_LED_D2_DETECT) {
+            s_mode = CORE_LED_SAVING;
+        }
+        xSemaphoreGive(s_mode_mtx);
+    }
 }
