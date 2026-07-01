@@ -62,6 +62,7 @@ static_assert(CORE_GPIO_MODE_CFG == GPIO_NUM_29, "PIN CONGELATO: MODE deve resta
 // --- Timing ---
 #define CORE_D2_POST_DELAY_MS  5000   // attesa dopo pin stop prima del DONE (configurabile via web)
 #define CORE_REC_STOP_DEBOUNCE_MS  50 // pin stop LOW stabile per fermare (anti-glitch)
+#define CORE_REC_STOP_POLL_MS      10 // polling pin stop (timer dedicato, indip. dal frame-rate)
 #define CORE_TPL_DONE_PULSE_MS  1000  // DONE HIGH per impulso nel loop di spegnimento
 #define CORE_TPL_DONE_GAP_MS     100  // riposo LOW tra un impulso DONE e il successivo
 #define CORE_MODE_POLL_MS         50  // intervallo polling GPIO29 (MODE) in config

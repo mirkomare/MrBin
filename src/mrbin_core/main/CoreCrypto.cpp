@@ -73,6 +73,68 @@ bool core_crypto_crypt_buffer(core_crypto_ctx_t *ctx, uint8_t *buf, size_t len, 
     return true;
 }
 
+// Costruisce il counter del blocco `block_idx` con la STESSA convenzione di ctr_crypt:
+// byte [8..15] = block_idx big-endian a 64 bit, byte [0..7] = 0.
+static void build_counter(uint64_t block_idx, uint8_t counter[16]) {
+    memset(counter, 0, 16);
+    uint64_t b = block_idx;
+    for (int i = 15; i >= 8; --i) {
+        counter[i] = (uint8_t)(b & 0xFF);
+        b >>= 8;
+    }
+}
+
+// Keystream ECB del blocco (AES-CTR usa sempre la chiave di cifratura).
+static void ecb_keystream(core_crypto_ctx_t *ctx, uint64_t block_idx, uint8_t ks[16]) {
+    uint8_t counter[16];
+    build_counter(block_idx, counter);
+    mbedtls_aes_crypt_ecb(&ctx->aes, MBEDTLS_AES_ENCRYPT, counter, ks);
+}
+
+bool core_crypto_crypt_at(core_crypto_ctx_t *ctx, uint8_t *buf, size_t len, uint64_t offset) {
+    if (!ctx || !ctx->initialized || !ctx->aes_ready || !buf) return false;
+    if (len == 0) return true;
+
+    size_t pos = 0;
+
+    // Blocco parziale iniziale (offset non allineato a 16).
+    size_t misalign = (size_t)(offset % 16);
+    if (misalign) {
+        uint8_t ks[16];
+        ecb_keystream(ctx, offset / 16, ks);
+        size_t take = 16 - misalign;
+        if (take > len) take = len;
+        for (size_t i = 0; i < take; ++i) {
+            buf[pos + i] ^= ks[misalign + i];
+        }
+        pos += take;
+    }
+
+    // Blocco allineato: CTR/DMA in un colpo solo (offset+pos multiplo di 16).
+    size_t remaining = len - pos;
+    size_t bulk = remaining - (remaining % 16);
+    if (bulk > 0) {
+        uint8_t nonce_counter[16];
+        build_counter((offset + pos) / 16, nonce_counter);
+        uint8_t stream_block[16];
+        size_t nc_off = 0;
+        mbedtls_aes_crypt_ctr(&ctx->aes, bulk, &nc_off, nonce_counter, stream_block,
+                              buf + pos, buf + pos);
+        pos += bulk;
+    }
+
+    // Blocco parziale finale.
+    if (pos < len) {
+        uint8_t ks[16];
+        ecb_keystream(ctx, (offset + pos) / 16, ks);
+        size_t rem = len - pos;
+        for (size_t i = 0; i < rem; ++i) {
+            buf[pos + i] ^= ks[i];
+        }
+    }
+    return true;
+}
+
 bool core_crypto_write_encrypted_chunk(core_crypto_ctx_t *ctx, FILE *fp,
                                        const uint8_t *plain, size_t len, uint64_t stream_offset) {
     if (!ctx || !fp || !plain || len == 0) return false;

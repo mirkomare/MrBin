@@ -126,15 +126,66 @@ bool core_gpio_boot_was_pir_wake(void) {
     return false;
 }
 
+static esp_timer_handle_t s_stop_timer = nullptr;
+static volatile bool      s_rec_stop_latched = false;
+
+// Campiona il pin di stop ogni CORE_REC_STOP_POLL_MS in un timer dedicato: il
+// rilevamento è preciso e indipendente dalla velocità del loop di cattura.
+static void rec_stop_poll_cb(void *arg) {
+    (void)arg;
+    if (s_rec_stop_latched) {
+        return;
+    }
+    if (!core_gpio_is_rec_stop_active()) {
+        s_rec_stop_low_since = -1;   // HIGH (o config): azzero il debounce
+        return;
+    }
+    int64_t now = esp_timer_get_time();
+    if (s_rec_stop_low_since < 0) {
+        s_rec_stop_low_since = now;
+        return;
+    }
+    if ((now - s_rec_stop_low_since) >= ((int64_t)CORE_REC_STOP_DEBOUNCE_MS * 1000)) {
+        s_rec_stop_latched = true;
+        ESP_LOGI(TAG, "Pin STOP (GPIO%d) LOW stabile %d ms -> STOP",
+                 (int)s_rec_stop_gpio, CORE_REC_STOP_DEBOUNCE_MS);
+    }
+}
+
 void core_gpio_rec_stop_session_begin(void) {
     s_rec_stop_low_since = -1;
+    s_rec_stop_latched = false;
     s_prev_d1_level = -1;
     s_prev_d2_level = -1;
+    if (!s_stop_timer) {
+        esp_timer_create_args_t args = {
+            .callback = rec_stop_poll_cb,
+            .name = "recstop",
+        };
+        if (esp_timer_create(&args, &s_stop_timer) != ESP_OK) {
+            s_stop_timer = nullptr;
+        }
+    }
+    if (s_stop_timer) {
+        esp_timer_stop(s_stop_timer);  // no-op se non attivo
+        esp_timer_start_periodic(s_stop_timer, (uint64_t)CORE_REC_STOP_POLL_MS * 1000);
+    }
+}
+
+void core_gpio_rec_stop_session_end(void) {
+    if (s_stop_timer) {
+        esp_timer_stop(s_stop_timer);
+    }
+    s_rec_stop_low_since = -1;
+    s_rec_stop_latched = false;
 }
 
 bool core_gpio_is_rec_stop_triggered(void) {
-    // Stop solo se il pin di stop (D1/D2 da config) resta LOW per almeno il debounce (50 ms).
-    // Glitch più brevi vengono ignorati.
+    // Il debounce (50 ms LOW stabile) è valutato dal timer dedicato: qui leggo il latch.
+    if (s_stop_timer) {
+        return s_rec_stop_latched;
+    }
+    // Fallback (timer non disponibile): valutazione inline come prima.
     if (!core_gpio_is_rec_stop_active()) {
         s_rec_stop_low_since = -1;
         return false;

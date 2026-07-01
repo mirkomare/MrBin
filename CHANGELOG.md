@@ -4,6 +4,92 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 **Versioning:** se non indicato diversamente, incrementare sempre l’**ultimo numero** (patch: `0.3.0` → `0.3.1`). Minor/major solo su richiesta esplicita.
 
+## [0.5.0] - 2026-07-01 — Minor STABLE: video 1080p nativo, cifratura real-time affidabile, PTS a tempo reale, stop pin robusto
+
+**Commit:** `__COMMIT_HASH__`  
+**Data/ora release:** `__COMMIT_DATE__`  
+**Tag:** `v0.5.0`  
+**Stato:** **Stable** — pipeline di registrazione consolidata: qualità video piena, download dei file cifrati funzionante, velocità di riproduzione corretta, rilevamento dello stop affidabile. Validata sul campo dall'utente ("sembra perfetta").  
+**Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
+**Versione firmware:** `src/mrbin_core/VERSION` → `0.5.0`
+
+### Contesto
+
+Release che chiude quattro problemi emersi nei test della 0.4.0: (1) qualità video bassa, (2) file scaricati "corrotti", (3) stop pin inaffidabile, (4) riproduzione accelerata. In più, chiarita e documentata la logica del timer TPL5110.
+
+### Aggiunto
+
+#### Qualità video: sensore OV5647 a 1920×1080 nativo (`sdkconfig.defaults`)
+- Il sensore era configurato con **formato di default RAW8 800×800** (indice 2) e l'immagine veniva **ingrandita** a 1080p (log `V4L2_SRC: Best match 800x800` + `Convert 800x800 to 1920x1080`) → qualità reale bassa.
+- Impostato il **default sensore su RAW10 1920×1080 @30** (indice 3) via
+  `CONFIG_CAMERA_OV5647_MIPI_DEFAULT_FMT_RAW10_1920X1080_30FPS=y` e
+  `CONFIG_CAMERA_OV5647_MIPI_IF_FORMAT_INDEX_DEFAULT=3` in `sdkconfig.defaults`
+  (e allineato l'`sdkconfig` attivo). Ora la cattura è **nativa a 1080p**, senza upscaling.
+
+#### File-writer cifrante dedicato del muxer (`CoreRecorder`)
+- Nuovo **`esp_muxer_file_writer_t`** (`enc_writer_open/write/seek/close`) installato con
+  `esp_muxer_set_file_writer()`: cifra **AES-128-CTR on-the-fly** mentre esp_muxer scrive
+  l'MP4 direttamente sul path reale su SD.
+- Header `[MRBI][IV]` (20 byte) a offset 0; l'MP4 logico parte al byte 20. Il buffer del
+  muxer non viene mutato (copia su scratch prima di cifrare). `on_seek` sposta solo la
+  posizione logica, così la riscrittura del box `moov` (`moov_before_mdat`) resta allineata
+  e l'header è preservato.
+- Nuovo setter interno **`core_recorder_set_mux_key()`**: la chiave AES arriva dai settings.
+
+#### PTS ancorati al tempo reale (`CoreRecorder`)
+- Nuovo campo `recorder_capture_t.pts_base_us` e helper **`recorder_next_pts_ms()`**:
+  ogni frame riceve `PTS = (esp_timer_now − base_primo_frame) / 1000` ms.
+- Stesso orologio per i frame bufferizzati in PSRAM (fase pre-SD) e per quelli live dopo
+  l'handoff su SD → **timeline continua**.
+
+#### Rilevamento stop pin disaccoppiato dal frame-rate (`CoreGPIO`)
+- Nuovo **timer periodico a 10 ms** (`CORE_REC_STOP_POLL_MS`) che campiona il pin di stop,
+  applica il debounce (`CORE_REC_STOP_DEBOUNCE_MS = 50 ms`) e **aggancia un latch**
+  (`s_rec_stop_latched`), indipendentemente dalla velocità del loop di cattura.
+- Nuove API **`core_gpio_rec_stop_session_end()`** (ferma il timer a fine sessione) e
+  `core_gpio_rec_stop_session_begin()` ora avvia il timer. `core_gpio_is_rec_stop_triggered()`
+  legge il latch (con fallback inline se il timer non è disponibile).
+
+#### Diagnostica
+- `recording_file_is_valid()` verifica e logga il magic dell'header:
+  `MP4 OK cifrato: ... (N bytes, header=MRBI)` oppure `SENZA header cifrato`.
+- Timing di avvio "da accensione": `Registrazione PSRAM attiva in X ms (Y ms da accensione)`
+  e `Primo frame catturato a Z ms da accensione`.
+
+### Modificato
+- Il muxer ora riceve il **path reale** (`final_path`) invece del path VFS `/enc`; l'MP4 è
+  cifrato dal writer dedicato, non più tramite il VFS `/enc` (che con `moov_before_mdat` +
+  buffering stdio + `fstat` sfasato di 20 byte produceva MP4 malformati → download "corrotto").
+- `recorder_muxer_feed_frame()` accetta un **PTS esplicito**; i due punti di alimentazione
+  frame (loop principale e drain) usano `recorder_next_pts_ms()`.
+
+### Corretto
+- **Qualità video bassa**: era upscaling da 800×800; ora 1080p nativo.
+- **Download "file corrotto"**: la scrittura cifrata via VFS `/enc` era incompatibile con la
+  riscrittura del `moov`; sostituita dal file-writer cifrante del muxer.
+- **Stop pin inaffidabile** ("va mandato tante volte, a volte non arriva mai"): il pin era
+  campionato una volta per frame e a 1080p il loop rallenta → finestra LOW persa. Ora timer
+  dedicato a 10 ms.
+- **Riproduzione accelerata**: la durata MP4 era più corta del reale; PTS ora a tempo reale.
+
+### Note tecniche — TPL5110 (nessuna modifica firmware, solo chiarimento)
+- Da datasheet TI: la resistenza su `DELAY/M_DRV` imposta **tIP**, che è il **tempo massimo di
+  accensione** (watchdog), non un intervallo di sonno. `DONE` spegne in anticipo entro tIP;
+  se `DONE` non arriva, il TPL taglia comunque a fine tIP (era il reset ~60 s).
+- **Timer mode** (`EN/ONE_SHOT=HIGH`): risveglio periodico ogni tIP → utile per "accensione
+  ogni N minuti". **One-shot** (`EN/ONE_SHOT=LOW`, uso attuale): risveglio dal PIR (M_DRV),
+  tIP = tetto massimo di accensione. La soluzione da 100k (tIP ≈ 30 min) è corretta.
+- Attenzione: finché `DELAY/M_DRV` resta HIGH, i `DONE` sono ignorati → il trigger PIR deve
+  essere un impulso breve.
+
+### Compatibilità
+- Il modulo `CoreEncFs` (VFS `/enc`) resta nel codice e registrato all'avvio, ma **non è più
+  usato dal muxer** (sostituito dal file-writer cifrante). Il formato su disco degli MP4
+  cifrati è invariato (header `[MRBI][IV]` + AES-128-CTR), quindi i file delle versioni
+  precedenti restano leggibili/scaricabili.
+
+---
+
 ## [0.4.0] - 2026-07-01 — Minor: pin config web, spegnimento TPL robusto, cifratura atomica, diagnostica reset
 
 **Commit:** `935b0879943b01aa7deb5fa7cbc7e7561c960e4a`  

@@ -7,6 +7,7 @@ idf_component_register(
         "CoreSD.cpp"
         "CoreVideo.cpp"
         "CoreRecorder.cpp"
+        "CoreEncFs.cpp"
         "CoreAuth.cpp"
         "CoreWeb.cpp"
         "CoreLive.cpp"
@@ -26,6 +27,7 @@ idf_component_register(
         mbedtls
         driver
         esp_timer
+        vfs
         esp_capture
         esp_muxer
         esp_video

@@ -1,4 +1,5 @@
 #include "CoreConfig.h"
+#include "CoreEncFs.h"
 #include "CoreGPIO.h"
 #include "CoreRecorder.h"
 #include "CoreSettings.h"
@@ -125,6 +126,7 @@ extern "C" void app_main(void) {
     core_gpio_save_boot_snapshot();
     core_status_led_init();
     core_gpio_set_rec_pins(g_settings.rec_gpio_start, g_settings.rec_gpio_stop);
+    core_encfs_register();  // VFS cifrante /enc: registrazioni MP4 cifrate on-the-fly
 
     setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
     tzset();

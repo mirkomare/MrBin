@@ -21,8 +21,9 @@ bool core_gpio_is_d2_end(void);       // GPIO21 LOW (ignorato se GPIO29 HIGH)
 bool core_gpio_is_mode_config(void);  // GPIO29 HIGH = WiFi/Web manuale
 void core_gpio_set_rec_pins(uint8_t start_gpio, uint8_t stop_gpio);
 bool core_gpio_boot_was_pir_wake(void);    // snapshot boot: wake PIR/TPL valido
-void core_gpio_rec_stop_session_begin(void); // reset debounce stop a inizio sessione
-bool core_gpio_is_rec_stop_triggered(void);  // true se pin stop LOW stabile >= 50 ms
+void core_gpio_rec_stop_session_begin(void); // avvia timer polling stop + reset debounce
+void core_gpio_rec_stop_session_end(void);   // ferma timer polling stop a fine sessione
+bool core_gpio_is_rec_stop_triggered(void);  // true se pin stop LOW stabile >= 50 ms (latch da timer)
 void core_gpio_log_pin_edges(void);          // log seriale su transizioni HIGH/LOW di D1 e D2
 bool core_gpio_is_rec_start_active(void);  // pin attivazione configurato LOW (runtime)
 bool core_gpio_is_rec_stop_active(void);   // pin stop configurato LOW (ignorato se GPIO29 HIGH)
