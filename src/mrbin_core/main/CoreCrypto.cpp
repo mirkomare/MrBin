@@ -17,25 +17,6 @@
 
 static const char *TAG = "core_crypto";
 
-static void ctr_crypt(core_crypto_ctx_t *ctx, uint8_t *buf, size_t len, uint64_t stream_offset) {
-    if (!ctx->aes_ready) {
-        return;
-    }
-
-    uint8_t stream_block[16];
-    uint8_t nonce_counter[16];
-    memcpy(nonce_counter, ctx->iv, 16);
-
-    uint64_t block_idx = stream_offset / 16;
-    for (int i = 15; i >= 0; --i) {
-        nonce_counter[i] = (uint8_t)(block_idx & 0xFF);
-        block_idx >>= 8;
-    }
-    size_t nc_off = stream_offset % 16;
-
-    mbedtls_aes_crypt_ctr(&ctx->aes, len, &nc_off, nonce_counter, stream_block, buf, buf);
-}
-
 bool core_crypto_init_ctx(core_crypto_ctx_t *ctx, const uint8_t key[16], const uint8_t iv[16]) {
     if (!ctx || !key || !iv) return false;
     memset(ctx, 0, sizeof(*ctx));
@@ -67,14 +48,38 @@ void core_crypto_reset_block_offset(core_crypto_ctx_t *ctx, uint64_t block_offse
     if (ctx) ctx->block_offset = block_offset;
 }
 
+// Stessa convenzione CTR di core_crypto_crypt_at (offset logico MP4 post-header MRBI).
 bool core_crypto_crypt_buffer(core_crypto_ctx_t *ctx, uint8_t *buf, size_t len, uint64_t stream_offset) {
     if (!ctx || !ctx->initialized || !buf) return false;
-    ctr_crypt(ctx, buf, len, stream_offset);
+    return core_crypto_crypt_at(ctx, buf, len, stream_offset);
+}
+
+static void ctr_crypt_legacy(core_crypto_ctx_t *ctx, uint8_t *buf, size_t len, uint64_t stream_offset) {
+    if (!ctx->aes_ready) {
+        return;
+    }
+
+    uint8_t stream_block[16];
+    uint8_t nonce_counter[16];
+    memcpy(nonce_counter, ctx->iv, 16);
+
+    uint64_t block_idx = stream_offset / 16;
+    for (int i = 15; i >= 0; --i) {
+        nonce_counter[i] = (uint8_t)(block_idx & 0xFF);
+        block_idx >>= 8;
+    }
+    size_t nc_off = stream_offset % 16;
+
+    mbedtls_aes_crypt_ctr(&ctx->aes, len, &nc_off, nonce_counter, stream_block, buf, buf);
+}
+
+bool core_crypto_crypt_buffer_legacy(core_crypto_ctx_t *ctx, uint8_t *buf, size_t len, uint64_t stream_offset) {
+    if (!ctx || !ctx->initialized || !buf) return false;
+    ctr_crypt_legacy(ctx, buf, len, stream_offset);
     return true;
 }
 
-// Costruisce il counter del blocco `block_idx` con la STESSA convenzione di ctr_crypt:
-// byte [8..15] = block_idx big-endian a 64 bit, byte [0..7] = 0.
+// Costruisce il counter del blocco `block_idx`: byte [8..15] = block_idx BE, [0..7] = 0.
 static void build_counter(uint64_t block_idx, uint8_t counter[16]) {
     memset(counter, 0, 16);
     uint64_t b = block_idx;

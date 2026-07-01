@@ -549,8 +549,13 @@ static bool recorder_capture_start_psram(recorder_capture_t *rc, uint32_t warmup
     rc->warmup_left = warmup_frames;
 
     if (!core_video_init()) {
-        ESP_LOGE(TAG, "core_video_init fallita");
-        return false;
+        ESP_LOGW(TAG, "core_video_init fallita — retry dopo deinit");
+        core_video_deinit();
+        vTaskDelay(pdMS_TO_TICKS(300));
+        if (!core_video_init()) {
+            ESP_LOGE(TAG, "core_video_init fallita");
+            return false;
+        }
     }
 
     esp_video_enc_register_default();
@@ -672,7 +677,7 @@ static bool recorder_muxer_start_from_buffer(recorder_muxer_t *muxer, const char
             .no_key_frame_verify = true,
         },
         .display_in_order = true,
-        .moov_before_mdat = false,
+        .moov_before_mdat = true,
     };
 
     esp_muxer_handle_t handle = esp_muxer_open((esp_muxer_config_t *)&mp4_cfg, sizeof(mp4_cfg));

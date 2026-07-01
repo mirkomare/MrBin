@@ -24,12 +24,14 @@ bool core_crypto_init_ctx(core_crypto_ctx_t *ctx, const uint8_t key[16], const u
 void core_crypto_deinit_ctx(core_crypto_ctx_t *ctx);
 void core_crypto_reset_block_offset(core_crypto_ctx_t *ctx, uint64_t block_offset);
 
-// Cifra/decifra in-place (AES-128-CTR via mbedTLS)
+// Cifra/decifra in-place (AES-128-CTR, stessa convenzione offset di core_crypto_crypt_at).
 bool core_crypto_crypt_buffer(core_crypto_ctx_t *ctx, uint8_t *buf, size_t len, uint64_t stream_offset);
+
+// Decifra con la convenzione legacy (pre dual-job / encrypt_mp4_file): IV poi block_idx su 16 byte.
+bool core_crypto_crypt_buffer_legacy(core_crypto_ctx_t *ctx, uint8_t *buf, size_t len, uint64_t stream_offset);
 
 // Cifra/decifra in-place a offset ARBITRARIO (anche non multiplo di 16): gestisce i
 // blocchi parziali iniziale/finale via ECB e il blocco allineato via CTR/DMA.
-// Stessa convenzione di counter di core_crypto_crypt_buffer (compatibile in lettura).
 bool core_crypto_crypt_at(core_crypto_ctx_t *ctx, uint8_t *buf, size_t len, uint64_t offset);
 
 // Scrive header MRBI + cifra chunk

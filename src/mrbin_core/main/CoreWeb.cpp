@@ -19,6 +19,7 @@
 #include "nvs_flash.h"
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -310,9 +311,12 @@ static esp_err_t handle_live_record_start(httpd_req_t *req) {
     }
 
     core_live_request_stop();
-    for (int i = 0; i < 100 && core_live_is_running(); ++i) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+    if (!core_live_wait_idle(10000)) {
+        snprintf(json, sizeof(json), "{\"ok\":false,\"msg\":\"Live stream ancora attivo\"}");
+        return send_json(req, json);
     }
+    core_video_deinit();
+    vTaskDelay(pdMS_TO_TICKS(CORE_CONFIG_CAMERA_DELAY_MS));
 
     if (!core_recorder_manual_start(s_settings)) {
         snprintf(json, sizeof(json), "{\"ok\":false,\"msg\":\"Avvio registrazione fallito\"}");
@@ -943,98 +947,294 @@ static esp_err_t handle_videos_delete(httpd_req_t *req) {
     return send_redirect(req, "/videos?deleted=1");
 }
 
-static esp_err_t stream_decrypted_mp4(httpd_req_t *req, const char *rel, bool as_download) {
-    if (!video_rel_path_valid(rel)) {
+static esp_err_t send_plain_err(httpd_req_t *req, const char *status, const char *msg) {
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
+}
+
+static void web_release_video_for_io(void) {
+    core_live_request_stop();
+    if (!core_live_wait_idle(10000)) {
+        ESP_LOGW(TAG, "Live non idle prima di I/O pesante — deinit forzato");
+    }
+    core_video_deinit();
+    vTaskDelay(pdMS_TO_TICKS(200));
+}
+
+static void web_free_stream_buf(void *buf, bool from_caps) {
+    if (!buf) {
+        return;
+    }
+    if (from_caps) {
+        heap_caps_free(buf);
+    } else {
+        free(buf);
+    }
+}
+
+typedef bool (*core_crypto_decrypt_fn)(core_crypto_ctx_t *, uint8_t *, size_t, uint64_t);
+
+static bool mp4_plain_header_valid(const uint8_t *p, size_t n) {
+    if (n < 8) {
+        return false;
+    }
+    return p[4] == 'f' && p[5] == 't' && p[6] == 'y' && p[7] == 'p';
+}
+
+static core_crypto_decrypt_fn stream_pick_decrypt_fn(FILE *fp, core_crypto_ctx_t *ctx) {
+    uint8_t enc[32];
+    long pos = ftell(fp);
+    if (fread(enc, 1, sizeof(enc), fp) != sizeof(enc)) {
+        fseek(fp, pos, SEEK_SET);
+        return core_crypto_crypt_at;
+    }
+    fseek(fp, pos, SEEK_SET);
+
+    uint8_t probe_at[32];
+    uint8_t probe_legacy[32];
+    memcpy(probe_at, enc, sizeof(enc));
+    memcpy(probe_legacy, enc, sizeof(enc));
+    core_crypto_crypt_at(ctx, probe_at, sizeof(probe_at), 0);
+    if (mp4_plain_header_valid(probe_at, sizeof(probe_at))) {
+        return core_crypto_crypt_at;
+    }
+    core_crypto_crypt_buffer_legacy(ctx, probe_legacy, sizeof(probe_legacy), 0);
+    if (mp4_plain_header_valid(probe_legacy, sizeof(probe_legacy))) {
+        ESP_LOGW(TAG, "Stream MP4: decifra con schema legacy (encrypt_mp4_file)");
+        return core_crypto_crypt_buffer_legacy;
+    }
+    ESP_LOGW(TAG, "Stream MP4: header ftyp non trovato — uso schema enc_writer (crypt_at)");
+    return core_crypto_crypt_at;
+}
+
+static bool stream_parse_range(const char *range_hdr, uint64_t plain_len,
+                               uint64_t *start, uint64_t *end_inclusive) {
+    if (!range_hdr || strncmp(range_hdr, "bytes=", 6) != 0) {
+        return false;
+    }
+    const char *p = range_hdr + 6;
+    const char *dash = strchr(p, '-');
+    if (!dash) {
+        return false;
+    }
+    *start = (uint64_t)strtoull(p, nullptr, 10);
+    if (dash[1] == '\0') {
+        *end_inclusive = plain_len > 0 ? plain_len - 1 : 0;
+    } else {
+        *end_inclusive = (uint64_t)strtoull(dash + 1, nullptr, 10);
+    }
+    if (*start >= plain_len) {
+        return false;
+    }
+    if (*end_inclusive >= plain_len) {
+        *end_inclusive = plain_len - 1;
+    }
+    return *end_inclusive >= *start;
+}
+
+static esp_err_t httpd_send_fixed_headers(httpd_req_t *req, const char *status,
+                                          const char *content_type, uint64_t body_len,
+                                          const char *content_range_or_null,
+                                          const char *content_disposition_or_null) {
+    char hdr[640];
+    int pos = snprintf(hdr, sizeof(hdr),
+                       "HTTP/1.1 %s\r\n"
+                       "Content-Type: %s\r\n"
+                       "Accept-Ranges: bytes\r\n"
+                       "Content-Length: %llu\r\n",
+                       status, content_type, (unsigned long long)body_len);
+    if (content_disposition_or_null) {
+        pos += snprintf(hdr + pos, sizeof(hdr) - pos, "Content-Disposition: %s\r\n",
+                        content_disposition_or_null);
+    }
+    if (content_range_or_null) {
+        pos += snprintf(hdr + pos, sizeof(hdr) - pos, "Content-Range: %s\r\n", content_range_or_null);
+    }
+    pos += snprintf(hdr + pos, sizeof(hdr) - pos, "Connection: close\r\n\r\n");
+    if (httpd_send(req, hdr, (size_t)pos) < 0) {
         return ESP_FAIL;
     }
+    return ESP_OK;
+}
+
+static esp_err_t stream_decrypted_mp4(httpd_req_t *req, const char *rel, bool as_download) {
+    if (!video_rel_path_valid(rel)) {
+        ESP_LOGW(TAG, "Stream MP4: path non valido");
+        return send_plain_err(req, "400 Bad Request", "Path non valido");
+    }
+
+    if (!core_sd_is_mounted() && !core_sd_init()) {
+        ESP_LOGE(TAG, "Stream MP4: SD non montata");
+        return send_plain_err(req, "503 Service Unavailable", "SD non disponibile");
+    }
+
+    web_release_video_for_io();
 
     char path[192];
     snprintf(path, sizeof(path), "%s/%s", CORE_SD_MOUNT_POINT, rel);
 
     struct stat fst;
     if (stat(path, &fst) != 0 || fst.st_size <= (off_t)CORE_CRYPTO_FILE_HEADER) {
-        return ESP_FAIL;
+        ESP_LOGW(TAG, "Stream MP4: file assente o troppo piccolo (%s)", path);
+        return send_plain_err(req, "404 Not Found", "File non trovato");
     }
     uint64_t plain_len = (uint64_t)fst.st_size - CORE_CRYPTO_FILE_HEADER;
 
     FILE *fp = fopen(path, "rb");
     if (!fp) {
-        return ESP_FAIL;
+        ESP_LOGE(TAG, "Stream MP4: fopen fallita (%s, errno=%d)", path, errno);
+        return send_plain_err(req, "500 Internal Server Error", "Impossibile aprire il file");
     }
 
     uint32_t magic = 0;
     if (fread(&magic, 1, sizeof(magic), fp) != sizeof(magic) || magic != CORE_CRYPTO_MAGIC) {
         fclose(fp);
-        return ESP_FAIL;
+        ESP_LOGW(TAG, "Stream MP4: header MRBI assente (%s)", path);
+        return send_plain_err(req, "400 Bad Request", "File non cifrato MRBI");
     }
     uint8_t iv[16];
     if (fread(iv, 1, sizeof(iv), fp) != sizeof(iv)) {
         fclose(fp);
-        return ESP_FAIL;
+        return send_plain_err(req, "400 Bad Request", "Header cifratura incompleto");
     }
 
     core_crypto_ctx_t ctx;
-    core_crypto_init_ctx(&ctx, s_settings->aes_key, iv);
+    if (!core_crypto_init_ctx(&ctx, s_settings->aes_key, iv)) {
+        fclose(fp);
+        return send_plain_err(req, "500 Internal Server Error", "Init decifratura fallita");
+    }
 
-    char *fbuf = (char *)heap_caps_malloc(CORE_SD_FILE_BUF_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    core_crypto_decrypt_fn decrypt_fn = stream_pick_decrypt_fn(fp, &ctx);
+
+    char range_hdr[96] = {0};
+    bool has_range = (httpd_req_get_hdr_value_str(req, "Range", range_hdr, sizeof(range_hdr)) == ESP_OK);
+    uint64_t range_start = 0;
+    uint64_t range_end = plain_len > 0 ? plain_len - 1 : 0;
+    if (has_range && !stream_parse_range(range_hdr, plain_len, &range_start, &range_end)) {
+        core_crypto_deinit_ctx(&ctx);
+        fclose(fp);
+        return send_plain_err(req, "416 Range Not Satisfiable", "Range non valido");
+    }
+    if (!has_range) {
+        range_start = 0;
+        range_end = plain_len > 0 ? plain_len - 1 : 0;
+    }
+    uint64_t send_len = range_end - range_start + 1;
+
+    char *fbuf = (char *)heap_caps_malloc(CORE_SD_FILE_BUF_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bool fbuf_caps = true;
+    if (!fbuf) {
+        fbuf = (char *)heap_caps_malloc(CORE_SD_FILE_BUF_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
     if (fbuf) {
         setvbuf(fp, fbuf, _IOFBF, CORE_SD_FILE_BUF_BYTES);
     }
 
     size_t io_buf_size = CORE_CRYPTO_STREAM_IO_BYTES;
-    uint8_t *buf = (uint8_t *)heap_caps_malloc(io_buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(io_buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bool buf_caps = true;
     if (!buf) {
+        buf = (uint8_t *)heap_caps_malloc(io_buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (!buf) {
+        io_buf_size = 8192;
         buf = (uint8_t *)heap_caps_malloc(io_buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
     if (!buf) {
         io_buf_size = 8192;
         buf = (uint8_t *)malloc(io_buf_size);
+        buf_caps = false;
     }
     if (!buf) {
-        if (fbuf) {
-            heap_caps_free(fbuf);
-        }
+        ESP_LOGE(TAG, "Stream MP4: buffer I/O esaurito (plain=%llu B)", (unsigned long long)plain_len);
+        core_crypto_deinit_ctx(&ctx);
+        web_free_stream_buf(fbuf, fbuf_caps);
+        fclose(fp);
+        return send_plain_err(req, "503 Service Unavailable", "Memoria insufficiente per lo stream");
+    }
+
+    const char *status = has_range ? "206 Partial Content" : "200 OK";
+    const char *ctype = as_download ? "application/octet-stream" : "video/mp4";
+    char content_range[80] = {0};
+    const char *cr_ptr = nullptr;
+    char disposition[160] = {0};
+    const char *disp_ptr = nullptr;
+    if (has_range) {
+        snprintf(content_range, sizeof(content_range), "bytes %llu-%llu/%llu",
+                 (unsigned long long)range_start, (unsigned long long)range_end,
+                 (unsigned long long)plain_len);
+        cr_ptr = content_range;
+    }
+    if (as_download) {
+        const char *slash = strrchr(rel, '/');
+        const char *fname = slash ? slash + 1 : rel;
+        snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", fname);
+        disp_ptr = disposition;
+    } else {
+        disp_ptr = "inline";
+    }
+
+    if (fseek(fp, (long)(CORE_CRYPTO_FILE_HEADER + range_start), SEEK_SET) != 0) {
+        core_crypto_deinit_ctx(&ctx);
+        web_free_stream_buf(fbuf, fbuf_caps);
+        web_free_stream_buf(buf, buf_caps);
+        fclose(fp);
+        return send_plain_err(req, "500 Internal Server Error", "Seek file fallito");
+    }
+
+    ESP_LOGI(TAG, "Stream MP4 %s: %s (%llu B decifrati%s%s)",
+             as_download ? "download" : "play", rel, (unsigned long long)send_len,
+             has_range ? ", Range " : "",
+             has_range ? range_hdr : "");
+
+    if (httpd_send_fixed_headers(req, status, ctype, send_len, cr_ptr, disp_ptr) != ESP_OK) {
+        core_crypto_deinit_ctx(&ctx);
+        web_free_stream_buf(fbuf, fbuf_caps);
+        web_free_stream_buf(buf, buf_caps);
         fclose(fp);
         return ESP_FAIL;
     }
 
-    char cl[24];
-    snprintf(cl, sizeof(cl), "%llu", (unsigned long long)plain_len);
-    httpd_resp_set_hdr(req, "Content-Length", cl);
-
-    if (as_download) {
-        const char *slash = strrchr(rel, '/');
-        const char *fname = slash ? slash + 1 : rel;
-        char disp[160];
-        snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", fname);
-        httpd_resp_set_type(req, "application/octet-stream");
-        httpd_resp_set_hdr(req, "Content-Disposition", disp);
-    } else {
-        httpd_resp_set_type(req, "video/mp4");
-        httpd_resp_set_hdr(req, "Content-Disposition", "inline");
-    }
-
-    uint64_t offset = 0;
-    size_t n;
+    uint64_t offset = range_start;
+    uint64_t remaining = send_len;
     esp_err_t err = ESP_OK;
-    while ((n = fread(buf, 1, io_buf_size, fp)) > 0) {
-        core_crypto_crypt_buffer(&ctx, buf, n, offset);
-        if (httpd_resp_send_chunk(req, (const char *)buf, n) != ESP_OK) {
+    bool logged_ftyp = false;
+    while (remaining > 0) {
+        size_t to_read = io_buf_size;
+        if ((uint64_t)to_read > remaining) {
+            to_read = (size_t)remaining;
+        }
+        size_t n = fread(buf, 1, to_read, fp);
+        if (n == 0) {
+            break;
+        }
+        if (!decrypt_fn(&ctx, buf, n, offset)) {
+            ESP_LOGE(TAG, "Stream MP4: decifratura fallita a offset %llu", (unsigned long long)offset);
+            err = ESP_FAIL;
+            break;
+        }
+        if (!logged_ftyp && offset == range_start && n >= 8) {
+            logged_ftyp = true;
+            if (mp4_plain_header_valid(buf, n)) {
+                ESP_LOGI(TAG, "Stream MP4: header decifrato OK (ftyp)");
+            } else {
+                ESP_LOGW(TAG, "Stream MP4: dati decifrati senza ftyp — file corrotto o chiave errata");
+            }
+        }
+        if (httpd_send(req, (const char *)buf, n) < 0) {
+            ESP_LOGI(TAG, "Stream MP4: client disconnesso a offset %llu", (unsigned long long)offset);
             err = ESP_FAIL;
             break;
         }
         offset += n;
+        remaining -= n;
     }
     fclose(fp);
-    if (fbuf) {
-        heap_caps_free(fbuf);
-    }
-    heap_caps_free(buf);
+    web_free_stream_buf(fbuf, fbuf_caps);
+    web_free_stream_buf(buf, buf_caps);
     core_crypto_deinit_ctx(&ctx);
-    if (err != ESP_OK) {
-        return err;
-    }
-    return httpd_resp_send_chunk(req, nullptr, 0);
+    return err;
 }
 
 static esp_err_t handle_videos_watch(httpd_req_t *req) {
@@ -1043,7 +1243,7 @@ static esp_err_t handle_videos_watch(httpd_req_t *req) {
     }
     char rel[128] = {0};
     if (!video_query_get_rel(req, rel, sizeof(rel))) {
-        return ESP_FAIL;
+        return send_plain_err(req, "400 Bad Request", "Parametro f mancante o non valido");
     }
 
     const char *slash = strrchr(rel, '/');
@@ -1087,7 +1287,7 @@ static esp_err_t handle_videos_download(httpd_req_t *req) {
     }
     char rel[128] = {0};
     if (!video_query_get_rel(req, rel, sizeof(rel))) {
-        return ESP_FAIL;
+        return send_plain_err(req, "400 Bad Request", "Parametro f mancante o non valido");
     }
     return stream_decrypted_mp4(req, rel, true);
 }
@@ -1098,7 +1298,7 @@ static esp_err_t handle_play(httpd_req_t *req) {
     }
     char rel[128] = {0};
     if (!video_query_get_rel(req, rel, sizeof(rel))) {
-        return ESP_FAIL;
+        return send_plain_err(req, "400 Bad Request", "Parametro f mancante o non valido");
     }
     return stream_decrypted_mp4(req, rel, false);
 }

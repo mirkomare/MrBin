@@ -7,6 +7,7 @@
 #include "esp_capture_sink.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -30,6 +31,7 @@ static volatile bool s_abort_requested = false;
 static QueueHandle_t s_stream_queue = nullptr;
 static SemaphoreHandle_t s_worker_ready = nullptr;
 static TaskHandle_t s_worker_task = nullptr;
+static volatile bool s_job_active = false;
 
 typedef struct {
     httpd_req_t *req;
@@ -139,6 +141,19 @@ bool core_live_is_running(void) {
     return s_running;
 }
 
+bool core_live_wait_idle(uint32_t timeout_ms) {
+    int64_t t0 = esp_timer_get_time();
+    while (s_running || s_job_active) {
+        if ((uint32_t)((esp_timer_get_time() - t0) / 1000) >= timeout_ms) {
+            ESP_LOGW(TAG, "Timeout attesa live idle (running=%d job=%d)",
+                     (int)s_running, (int)s_job_active);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    return true;
+}
+
 static esp_err_t core_live_stream_impl(httpd_req_t *req) {
     if (!core_live_start()) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Camera non disponibile");
@@ -215,7 +230,9 @@ static void live_stream_worker(void *) {
         }
 
         ESP_LOGI(TAG, "Live stream async — connessione client");
+        s_job_active = true;
         core_live_stream_impl(job.req);
+        s_job_active = false;
 
         if (httpd_req_async_handler_complete(job.req) != ESP_OK) {
             ESP_LOGW(TAG, "httpd_req_async_handler_complete fallita");
