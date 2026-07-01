@@ -6,8 +6,8 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 ## [0.5.1] - 2026-07-01 — Patch: dual-job PSRAM, qualità H264, filesystem/chiusura MP4, stop D2/LED
 
-**Commit:** *(compilato al tag — vedi riga sotto dopo push)*  
-**Data/ora release:** 2026-07-01 (Europe/Rome)  
+**Commit:** `39651560d492f149872ab10b6deca7d6c51eef35`  
+**Data/ora release:** 2026-07-01 19:54:03 +0200  
 **Tag:** `v0.5.1`  
 **Stato:** **Stable** (patch su 0.5.0) — registrazione evento completa PIR→D2, qualità video utilizzabile, spegnimento con feedback LED corretto, pipeline file cifrati consolidata.  
 **Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
