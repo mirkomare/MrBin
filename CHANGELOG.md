@@ -4,6 +4,57 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 **Versioning:** se non indicato diversamente, incrementare sempre l’**ultimo numero** (patch: `0.3.0` → `0.3.1`). Minor/major solo su richiesta esplicita.
 
+## [0.5.2] - 2026-07-02 — Patch: live CONFIG, boot dual-mode PIR/CONFIG, settings web
+
+**Commit:** `a7c9f69669f1c3e2dc891049b240cbc07ebb6c18`  
+**Data/ora release:** 2026-07-02 00:35:06 +0200  
+**Tag:** `v0.5.2`  
+**Stato:** **Stable** (patch su 0.5.1) — live stream MJPEG funzionante in modalità CONFIG, avvio PIR accelerato, pagina impostazioni web affidabile.  
+**Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
+**Versione firmware:** `src/mrbin_core/VERSION` → `0.5.2`
+
+### Contesto
+
+Dopo la 0.5.1 la registrazione PIR dual-job era stabile, ma in **modalità CONFIG** (MODE=HIGH) il live MJPEG falliva con `Failed to register video VFS dev name=video20` — slot VFS esauriti dal mount `/enc` + `/sdcard` prima dell'init camera. Serviva separare i percorsi di boot PIR (veloce) e CONFIG (WiFi/Web) e correggere il salvataggio impostazioni via web.
+
+### Aggiunto
+
+#### Boot dual-mode (`mrbin_core_main.cpp`, `CoreConfig.h`)
+- **PIR** (MODE=LOW): avvio minimale — capture camera prima del mount SD; warmup **2 frame** (`CORE_REC_WARMUP_DROP_FRAMES_PIR`).
+- **CONFIG** (MODE=HIGH): avvio completo — WiFi → SD (retry) → Web; camera **lazy** solo su `/live/stream`.
+- Marcatori timing boot: `g_core_boot_us`, `core_boot_elapsed_ms()`, `core_time_init()` differito in CONFIG/SD-prep.
+
+#### Live stream CONFIG (`CoreVideo`, `CoreLive`, `CoreWeb`)
+- Init camera **solo** in `core_live_start()` via `core_video_prepare_for_stream()` (rimosso init da `handle_live_get` e da boot web).
+- `esp_video_init_with_flags(MIPI_CSI | ISP)` al posto di `ESP_VIDEO_INIT_FLAGS_ALL`.
+- Retry init (5×, 500 ms), mutex serializzazione, log heap DMA pre/post fallimento.
+- Anteprima live **800×640 @ 10 fps** MJPEG (registrazione resta 1280×960 @ 12 fps H264).
+
+#### VFS e sdkconfig (`CoreEncFs`, `CoreRecorder`, `sdkconfig.defaults`)
+- VFS cifrante `/enc` registrato **lazy** all'inizio registrazione, non più all'avvio — libera uno slot VFS in CONFIG per la camera.
+- `CONFIG_VFS_MAX_COUNT=12` (da 8); DVP video device disabilitato.
+- Flash size default corretto a **32 MB** (`CONFIG_ESPTOOLPY_FLASHSIZE_32MB`).
+
+#### SD boot CONFIG (`CoreSD`)
+- `core_sd_init_boot()`: mount con **5 retry** e log heap pre-mount; mutex mount, `CORE_SD_MOUNT_MAX_FILES=8`.
+
+#### Settings web (`CoreWeb`, `CoreSettings`, `CoreConfig`)
+- POST body completo + URL decode; range delay D2 **100–600000 ms** con validazione e feedback `?saved=1/0`.
+
+### Modificato
+- Sequenza boot CONFIG: `WiFi → SD → Web (camera lazy su /live/stream)`.
+- `core_web_stop()`: deinit camera dopo stop HTTP server.
+
+### Corretto
+- **Live stream CONFIG**: esaurimento slot VFS ISP (`video20`) — risolto con `/enc` lazy + VFS_MAX_COUNT=12 + init flags minimali.
+- **Doppio init camera**: pagina `/live` + stream innescavano due cicli init/retry — init unificato solo nello stream.
+- **Salvataggio impostazioni web**: body POST troncato e delay fuori range rifiutato silenziosamente.
+
+### Compatibilità
+- Formato MP4 cifrato, pin GPIO e pipeline dual-job PIR invariati rispetto a 0.5.1.
+
+---
+
 ## [0.5.1] - 2026-07-01 — Patch: dual-job PSRAM, qualità H264, filesystem/chiusura MP4, stop D2/LED
 
 **Commit:** `39651560d492f149872ab10b6deca7d6c51eef35`  
