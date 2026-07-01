@@ -6,7 +6,7 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 ## [0.4.0] - 2026-07-01 — Minor: pin config web, spegnimento TPL robusto, cifratura atomica, diagnostica reset
 
-**Commit:** `<da compilare nel commit docs successivo>`  
+**Commit:** `935b0879943b01aa7deb5fa7cbc7e7561c960e4a`  
 **Data/ora release:** 2026-07-01 11:19:44 +0200  
 **Tag:** `v0.4.0`  
 **Stato:** **Stable** (minor) — configurazione pin registrazione da Web, gestione spegnimento TPL5110 rivista, cifratura MP4 atomica anti-corruzione, recupero file orfani e diagnostica di reset/alimentazione.  
