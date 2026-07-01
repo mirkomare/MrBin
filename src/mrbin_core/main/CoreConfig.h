@@ -3,12 +3,25 @@
 #include "driver/gpio.h"
 #include <stdint.h>
 
-// --- GPIO segnali PIR / TPL5111 (CORE = ESP32-P4) ---
-#define CORE_GPIO_D1_WAKE   GPIO_NUM_28   // LOW = accensione per movimento (D1)
-#define CORE_GPIO_D2_END    GPIO_NUM_21   // LOW = fine movimento (D2)
-#define CORE_GPIO_TPL_DONE  GPIO_NUM_23   // HIGH = DONE verso TPL5111 (spegnimento)
-// HIGH al boot = config (WiFi/Web); LOW = PIR. Interruttore GND / 3V3 (mai >3,3 V sul pin)
-#define CORE_GPIO_MODE_CFG  GPIO_NUM_29
+// =====================================================================
+// MAPPA PIN CONGELATA — NON MODIFICARE (hardware MrBin CORE / TPL5110)
+// Ruolo start/stop tra D1 e D2 si sceglie dalla Web interface, NON qui.
+//   D1   = GPIO28   wake movimento PIR (LOW attivo)
+//   D2   = GPIO21   fine movimento    (LOW attivo)
+//   DONE = D10 = GPIO23   DONE verso TPL5110 (HIGH = spegnimento)
+//   MODE = GPIO29   HIGH = config WiFi/Web, LOW = PIR
+// =====================================================================
+#define CORE_GPIO_D1_WAKE   GPIO_NUM_28   // D1  — LOW = accensione per movimento
+#define CORE_GPIO_D2_END    GPIO_NUM_21   // D2  — LOW = fine movimento
+#define CORE_GPIO_TPL_DONE  GPIO_NUM_23   // DONE (D10) — HIGH = DONE verso TPL5110 (spegnimento)
+#define CORE_GPIO_MODE_CFG  GPIO_NUM_29   // MODE — HIGH = config (WiFi/Web), LOW = PIR
+
+#if defined(__cplusplus)
+static_assert(CORE_GPIO_D1_WAKE  == GPIO_NUM_28, "PIN CONGELATO: D1 deve restare GPIO28");
+static_assert(CORE_GPIO_D2_END   == GPIO_NUM_21, "PIN CONGELATO: D2 deve restare GPIO21");
+static_assert(CORE_GPIO_TPL_DONE == GPIO_NUM_23, "PIN CONGELATO: DONE/D10 deve restare GPIO23");
+static_assert(CORE_GPIO_MODE_CFG == GPIO_NUM_29, "PIN CONGELATO: MODE deve restare GPIO29");
+#endif
 // LED errore boot PIR senza D1 — header 2x20 alto-sx, HIGH=on, pull-down esterno
 #define CORE_GPIO_STATUS_LED      GPIO_NUM_52
 #define CORE_STATUS_LED_ON_LEVEL  1
@@ -47,7 +60,12 @@
 #define CORE_CSI_I2C_SDA    GPIO_NUM_7
 
 // --- Timing ---
-#define CORE_D2_POST_DELAY_MS  5000   // attesa dopo D2 prima del DONE (configurabile via web)
+#define CORE_D2_POST_DELAY_MS  5000   // attesa dopo pin stop prima del DONE (configurabile via web)
+#define CORE_REC_STOP_DEBOUNCE_MS  50 // pin stop LOW stabile per fermare (anti-glitch)
+#define CORE_TPL_DONE_PULSE_MS  1000  // DONE HIGH per impulso nel loop di spegnimento
+#define CORE_TPL_DONE_GAP_MS     100  // riposo LOW tra un impulso DONE e il successivo
+#define CORE_MODE_POLL_MS         50  // intervallo polling GPIO29 (MODE) in config
+#define CORE_MODE_EXIT_DEBOUNCE_MS 150 // MODE LOW stabile per uscire da config e spegnere
 
 // --- Storage ---
 #define CORE_SD_MOUNT_POINT "/sdcard"
@@ -75,6 +93,6 @@
 #define CORE_SD_PREP_TASK_PRIO      3
 #define CORE_REC_ACQUIRE_TIMEOUT_MS 100
 
-// Credenziali web (user mm / pass 123456) — hash SHA-256 di "mm:123456"
+// Credenziali web (user mm / pass GaPaMi) — hash SHA-256 di "mm:GaPaMi"
 // Generato offline; verifica in CoreAuth.cpp
 extern const uint8_t CORE_AUTH_SHA256[32];

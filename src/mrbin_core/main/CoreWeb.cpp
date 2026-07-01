@@ -7,6 +7,7 @@
 #include "CoreSD.h"
 #include "CoreStatusLed.h"
 #include "CoreVideo.h"
+#include "CoreGPIO.h"
 
 #include "dirent.h"
 #include "esp_http_server.h"
@@ -70,8 +71,11 @@ static const char *SETTINGS_HTML_HEAD = R"HTML(
 <!DOCTYPE html><html><head><meta charset="utf-8"><title>Impostazioni CORE</title>
 <style>
 body{font-family:sans-serif;max-width:640px;margin:24px auto}
-input,button{padding:8px;margin:4px 0;width:100%}
+input,button,select{padding:8px;margin:4px 0;width:100%;box-sizing:border-box}
 nav a{margin-right:12px}
+fieldset.gpio-cfg{border:1px solid #ccc;border-radius:8px;padding:12px 16px;margin:16px 0}
+fieldset.gpio-cfg legend{font-weight:600;padding:0 6px}
+.hint{font-size:14px;color:#555;margin:0 0 10px;line-height:1.45}
 .sd-info{padding:10px 12px;margin:12px 0;border-radius:6px;background:#eef3ff;border:1px solid #c5d4f5}
 .sd-info.warn{background:#fff8e6;border-color:#f0d080}
 .alert{padding:12px 14px;margin:12px 0;border-radius:6px}
@@ -256,10 +260,11 @@ static void recording_path_for_web(const char *full_path, char *out, size_t out_
         return;
     }
     const char *prefix = CORE_SD_MOUNT_POINT "/";
+    int prec = (int)(out_len - 1);
     if (strncmp(full_path, prefix, strlen(prefix)) == 0) {
-        snprintf(out, out_len, "%s", full_path + strlen(prefix));
+        snprintf(out, out_len, "%.*s", prec, full_path + strlen(prefix));
     } else {
-        snprintf(out, out_len, "%s", full_path);
+        snprintf(out, out_len, "%.*s", prec, full_path);
     }
 }
 
@@ -629,14 +634,33 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
         }
     }
 
-    char body[4096];
+    char pin_cfg[768];
+    uint8_t rec_stop = s_settings ? s_settings->rec_gpio_stop : (uint8_t)CORE_GPIO_D2_END;
+    snprintf(pin_cfg, sizeof(pin_cfg),
+        "<fieldset class='gpio-cfg'>"
+        "<legend>Pin di stop registrazione</legend>"
+        "<p class='hint'>La registrazione parte <strong>subito all'accensione</strong>; "
+        "non serve un pin di start.<br>"
+        "Si ferma quando il pin di stop resta <strong>LOW per almeno 50 ms</strong>.<br>"
+        "Default: <strong>D2 (GPIO21)</strong>.</p>"
+        "<label>Pin di stop (fine video)</label>"
+        "<select name='rec_gpio_stop' id='rec_stop'>"
+        "<option value='21'%s>D2 — GPIO21</option>"
+        "<option value='28'%s>D1 — GPIO28</option>"
+        "</select>"
+        "</fieldset>",
+        rec_stop == 21 ? " selected" : "",
+        rec_stop == 28 ? " selected" : "");
+
+    char body[5120];
     snprintf(body, sizeof(body),
         "%s"
         "%s"
         "%s"
         "<form method='POST' action='/settings'>"
         "<label>CORE ID (5 cifre)</label><input name='core_id' value='%05lu'>"
-        "<label>Delay dopo D2 (ms)</label><input name='d2_delay' value='%lu'>"
+        "%s"
+        "<label>Delay dopo pin stop (ms)</label><input name='d2_delay' value='%lu'>"
         "<label>WiFi SSID</label><input name='wifi_ssid' value='%s'>"
         "<label>WiFi Password</label><input name='wifi_pass' type='password' value='%s'>"
         "<label>Chiave AES-128 (hex, sola lettura)</label><input readonly value='%s'>"
@@ -649,6 +673,7 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
         flash,
         sd_info,
         s_settings ? (unsigned long)s_settings->core_id : 0UL,
+        pin_cfg,
         s_settings ? (unsigned long)s_settings->d2_post_delay_ms : (unsigned long)CORE_D2_POST_DELAY_MS,
         s_settings ? s_settings->wifi_ssid : "",
         s_settings ? s_settings->wifi_pass : "",
@@ -661,15 +686,17 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
 
 static esp_err_t handle_settings_post(httpd_req_t *req) {
     if (!is_authed(req) || !s_settings) return send_redirect(req, "/");
-    char buf[512];
+    char buf[768];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) return ESP_FAIL;
     buf[len] = 0;
 
     char id_s[16] = {0}, delay_s[16] = {0}, ssid[32] = {0}, pass[64] = {0};
+    char stop_s[8] = {0};
     char *f;
     if ((f = strstr(buf, "core_id="))) sscanf(f, "core_id=%15[^&]", id_s);
     if ((f = strstr(buf, "d2_delay="))) sscanf(f, "d2_delay=%15[^&]", delay_s);
+    if ((f = strstr(buf, "rec_gpio_stop="))) sscanf(f, "rec_gpio_stop=%7[^&]", stop_s);
     if ((f = strstr(buf, "wifi_ssid="))) sscanf(f, "wifi_ssid=%31[^&]", ssid);
     if ((f = strstr(buf, "wifi_pass="))) sscanf(f, "wifi_pass=%63s", pass);
 
@@ -677,9 +704,18 @@ static esp_err_t handle_settings_post(httpd_req_t *req) {
     if (id >= CORE_ID_MIN && id <= CORE_ID_MAX) s_settings->core_id = id;
     uint32_t delay = (uint32_t)atoi(delay_s);
     if (delay >= 1000 && delay <= 600000) s_settings->d2_post_delay_ms = delay;
+    // Solo il pin di stop è configurabile; lo start è sempre "accensione" (nessun pin).
+    uint8_t stop_gpio = (uint8_t)atoi(stop_s);
+    if (stop_gpio == (uint8_t)CORE_GPIO_D2_END || stop_gpio == (uint8_t)CORE_GPIO_D1_WAKE) {
+        s_settings->rec_gpio_stop = stop_gpio;
+        s_settings->rec_gpio_start = (stop_gpio == (uint8_t)CORE_GPIO_D2_END)
+                                         ? (uint8_t)CORE_GPIO_D1_WAKE
+                                         : (uint8_t)CORE_GPIO_D2_END;
+    }
     snprintf(s_settings->wifi_ssid, sizeof(s_settings->wifi_ssid), "%s", ssid);
     snprintf(s_settings->wifi_pass, sizeof(s_settings->wifi_pass), "%s", pass);
     core_settings_save(s_settings);
+    core_gpio_set_rec_pins(s_settings->rec_gpio_start, s_settings->rec_gpio_stop);
     return send_redirect(req, "/settings");
 }
 
@@ -749,7 +785,7 @@ static esp_err_t handle_videos_get(httpd_req_t *req) {
                 continue;
             }
             char daypath[64];
-            snprintf(daypath, sizeof(daypath), "%s/%s", CORE_SD_MOUNT_POINT, day->d_name);
+            snprintf(daypath, sizeof(daypath), "%s/%.40s", CORE_SD_MOUNT_POINT, day->d_name);
             struct stat day_st;
             if (stat(daypath, &day_st) != 0 || !S_ISDIR(day_st.st_mode)) {
                 continue;
@@ -763,14 +799,23 @@ static esp_err_t handle_videos_get(httpd_req_t *req) {
                 if (f->d_name[0] == '.' || f->d_name[0] == 0) {
                     continue;
                 }
+                // Ignora i file di cifratura in corso (.part): il .mp4 definitivo
+                // compare solo a rinomina atomica completata.
+                if (strstr(f->d_name, ".part") != nullptr) {
+                    continue;
+                }
                 bool is_tmp = (strstr(f->d_name, ".mp4.tmp") != nullptr);
                 if (!is_tmp && strstr(f->d_name, ".mp4") == nullptr) {
                     continue;
                 }
                 char fpath[160];
-                snprintf(fpath, sizeof(fpath), "%s/%s", daypath, f->d_name);
+                snprintf(fpath, sizeof(fpath), "%.60s/%.90s", daypath, f->d_name);
                 struct stat fst;
                 if (stat(fpath, &fst) != 0 || !S_ISREG(fst.st_mode)) {
+                    continue;
+                }
+                // Scarta file finali a 0 byte/corrotti: non riproducibili, non mostrarli.
+                if (!is_tmp && fst.st_size < (off_t)CORE_CRYPTO_FILE_HEADER) {
                     continue;
                 }
                 char size_h[32];
@@ -786,7 +831,7 @@ static esp_err_t handle_videos_get(httpd_req_t *req) {
                     continue;
                 }
                 char rel[96];
-                snprintf(rel, sizeof(rel), "%s/%s", day->d_name, f->d_name);
+                snprintf(rel, sizeof(rel), "%.40s/%.50s", day->d_name, f->d_name);
                 char rel_enc[128];
                 url_encode_query(rel, rel_enc, sizeof(rel_enc));
                 off += snprintf(body + off, sizeof(body) - off,

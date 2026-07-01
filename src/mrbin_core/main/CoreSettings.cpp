@@ -11,6 +11,27 @@ static const char *TAG = "core_settings";
 
 static nvs_handle_t s_nvs = 0;
 
+void core_settings_rec_pins_set_defaults(core_settings_t *s) {
+    if (!s) {
+        return;
+    }
+    s->rec_gpio_start = (uint8_t)CORE_GPIO_D1_WAKE;
+    s->rec_gpio_stop = (uint8_t)CORE_GPIO_D2_END;
+}
+
+bool core_settings_rec_pins_valid(uint8_t start_gpio, uint8_t stop_gpio) {
+    if (start_gpio == stop_gpio) {
+        return false;
+    }
+    if (start_gpio != (uint8_t)CORE_GPIO_D1_WAKE && start_gpio != (uint8_t)CORE_GPIO_D2_END) {
+        return false;
+    }
+    if (stop_gpio != (uint8_t)CORE_GPIO_D1_WAKE && stop_gpio != (uint8_t)CORE_GPIO_D2_END) {
+        return false;
+    }
+    return true;
+}
+
 bool core_settings_init(void) {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -33,6 +54,7 @@ bool core_settings_load(core_settings_t *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     out->d2_post_delay_ms = CORE_D2_POST_DELAY_MS;
+    core_settings_rec_pins_set_defaults(out);
 
     uint32_t id = 0;
     if (nvs_get_u32(s_nvs, "core_id", &id) == ESP_OK && id >= CORE_ID_MIN && id <= CORE_ID_MAX) {
@@ -54,6 +76,19 @@ bool core_settings_load(core_settings_t *out) {
     if (nvs_get_u32(s_nvs, "d2_delay", &delay_ms) == ESP_OK && delay_ms >= 1000 && delay_ms <= 600000) {
         out->d2_post_delay_ms = delay_ms;
     }
+
+    uint8_t start_gpio = 0;
+    uint8_t stop_gpio = 0;
+    if (nvs_get_u8(s_nvs, "rec_gpio_start", &start_gpio) == ESP_OK &&
+        nvs_get_u8(s_nvs, "rec_gpio_stop", &stop_gpio) == ESP_OK &&
+        core_settings_rec_pins_valid(start_gpio, stop_gpio)) {
+        out->rec_gpio_start = start_gpio;
+        out->rec_gpio_stop = stop_gpio;
+    } else if (nvs_get_u8(s_nvs, "rec_gpio_start", &start_gpio) == ESP_OK ||
+               nvs_get_u8(s_nvs, "rec_gpio_stop", &stop_gpio) == ESP_OK) {
+        ESP_LOGW(TAG, "Pin registrazione NVS non validi (start=%u stop=%u) — ripristino default D1/D2",
+                 (unsigned)start_gpio, (unsigned)stop_gpio);
+    }
     return true;
 }
 
@@ -70,6 +105,10 @@ bool core_settings_save(const core_settings_t *in) {
     err = nvs_set_str(s_nvs, "wifi_pass", in->wifi_pass);
     if (err != ESP_OK) return false;
     err = nvs_set_u32(s_nvs, "d2_delay", in->d2_post_delay_ms);
+    if (err != ESP_OK) return false;
+    err = nvs_set_u8(s_nvs, "rec_gpio_start", in->rec_gpio_start);
+    if (err != ESP_OK) return false;
+    err = nvs_set_u8(s_nvs, "rec_gpio_stop", in->rec_gpio_stop);
     if (err != ESP_OK) return false;
     return nvs_commit(s_nvs) == ESP_OK;
 }

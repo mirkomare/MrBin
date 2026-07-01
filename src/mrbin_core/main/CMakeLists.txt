@@ -33,7 +33,10 @@ idf_component_register(
 )
 
 # GCC 14 (IDF 5.5.4) is strict about path formatting in FatFS helpers.
+# -Wno-missing-field-initializers: i designated initializer parziali su struct
+# dell'SDK (esp_capture/esp_muxer) azzerano i campi non elencati: rumore innocuo.
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=format-truncation
     -Wno-error=stringop-truncation
-    -Wno-error=missing-field-initializers)
+    -Wno-error=missing-field-initializers
+    -Wno-missing-field-initializers)

@@ -4,6 +4,73 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 **Versioning:** se non indicato diversamente, incrementare sempre l’**ultimo numero** (patch: `0.3.0` → `0.3.1`). Minor/major solo su richiesta esplicita.
 
+## [0.4.0] - 2026-07-01 — Minor: pin config web, spegnimento TPL robusto, cifratura atomica, diagnostica reset
+
+**Commit:** `<da compilare nel commit docs successivo>`  
+**Data/ora release:** 2026-07-01 11:19:44 +0200  
+**Tag:** `v0.4.0`  
+**Stato:** **Stable** (minor) — configurazione pin registrazione da Web, gestione spegnimento TPL5110 rivista, cifratura MP4 atomica anti-corruzione, recupero file orfani e diagnostica di reset/alimentazione.  
+**Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
+**Versione firmware:** `src/mrbin_core/VERSION` → `0.4.0`
+
+### Aggiunto
+
+#### Configurazione pin registrazione da Web (`CoreWeb`, `CoreSettings`)
+- Nuova sezione **"Pin registrazione PIR"** nella pagina di configurazione: selezione del **pin di stop** (D1 o D2) della registrazione.
+- Nuovi campi NVS **`rec_gpio_start`** e **`rec_gpio_stop`** in `core_settings_t`, con validazione (`core_settings_rec_pins_valid`) e default (`core_settings_rec_pins_set_defaults`): default **start = D1 (GPIO28)**, **stop = D2 (GPIO21)**.
+- Persistenza dei pin su NVS in `core_settings_save` / `core_settings_load`.
+- Applicazione runtime dei pin via **`core_gpio_set_rec_pins()`** dopo il caricamento delle impostazioni.
+
+#### Spegnimento config-mode controllato da GPIO29/MODE (`mrbin_core_main`)
+- In modalità **config** il firmware ora monitora **solo GPIO29 (MODE)**: si entra con MODE **HIGH** al boot e, se MODE **torna LOW** (stabile per `CORE_MODE_EXIT_DEBOUNCE_MS = 150 ms`, anti-glitch), si esce **subito** e si avvia lo spegnimento (DONE al TPL, nessun ritardo).
+- **Heartbeat** periodico (ogni 5 s) con uptime: `Config attiva: uptime N s (MODE=HIGH)`.
+- Arresto pulito del web server (`core_web_stop()`) prima dello spegnimento.
+
+#### Diagnostica reset e alimentazione (`mrbin_core_main`)
+- Log **`log_reset_reason()`** all'avvio: distingue **POWERON / BROWNOUT / PANIC / INT_WDT / TASK_WDT / SW / EXT / DEEPSLEEP**, per capire se lo spegnimento improvviso è alimentazione (brownout), TPL (power-cycle pulito) o crash firmware.
+
+#### Recupero registrazioni interrotte (`CoreRecorder`)
+- Nuova API **`core_recorder_recover_tmp_files()`**: all'ingresso in config scandisce `/sdcard/<giorno>/`, **cifra e finalizza** i `.mp4.tmp` orfani validi (residui di spegnimenti improvvisi) ed **elimina** quelli corrotti. Raccolta nomi prima dell'elaborazione (evita di modificare la directory durante `readdir`, fragile su FATFS).
+
+#### Log stato pin (`CoreGPIO`)
+- **`core_gpio_log_pin_edges()`**: log seriale sulle transizioni HIGH/LOW di D1 e D2 durante la registrazione (debug rumore/floating).
+- **`core_gpio_rec_stop_session_begin()`** / **`core_gpio_is_rec_stop_triggered()`**: gestione dedicata dello stop con debounce.
+
+### Modificato
+
+#### Cifratura MP4 atomica anti-corruzione (`CoreRecorder`)
+- **`encrypt_mp4_file()`** ora scrive su file temporaneo **`<nome>.mp4.part`** e lo **rinomina** in `.mp4` **solo a cifratura completata**: il file finale non è mai visibile a 0 byte/incompleto. Su qualsiasi errore il `.part` viene rimosso.
+- Risolve il bug del **file a 0 byte** creato dalla web/gestione file quando la cifratura (specialmente in background) era in corso o veniva interrotta.
+
+#### Segnale DONE TPL5110 pulsato (`CoreGPIO`)
+- **`core_gpio_hold_tpl_done()`** ora emette un **loop di spegnimento**: DONE **HIGH 1000 ms / LOW 100 ms** all'infinito (`CORE_TPL_DONE_PULSE_MS`, `CORE_TPL_DONE_GAP_MS`) finché il TPL toglie alimentazione — spegnimento robusto (modello device polling BLEmax).
+
+#### Stop registrazione con debounce (`CoreGPIO`, `CoreRecorder`)
+- Lo stop avviene quando il **pin stop configurato** è LOW **stabile per ≥ `CORE_REC_STOP_DEBOUNCE_MS` (50 ms)**, filtrando i glitch che causavano stop immediati.
+- Rimossa la vecchia attesa di rilascio D2; `should_stop()` usa `core_gpio_is_rec_stop_triggered()`.
+
+#### Modalità operativa normale (`mrbin_core_main`)
+- **`run_pir_mode()`** registra **sempre e subito** se MODE è LOW (TPL5110 in manual), senza pretendere D1 LOW al boot; lo stop resta sul pin configurato.
+
+#### Autenticazione Web (`CoreAuth`)
+- Password utente `mm` cambiata da `123456` a **`GaPaMi`** (`CORE_AUTH_SHA256` = SHA-256 di `mm:GaPaMi`).
+
+#### Listing video robusto (`CoreWeb`)
+- I file **`.part`** (cifratura in corso) sono **ignorati** nella lista.
+- I `.mp4` finali **sotto la dimensione dell'header crypto** (0 byte/corrotti) non vengono più mostrati (niente più errori al click).
+- `snprintf` con precisione esplicita (`%.*s`) e buffer ampliati per evitare `-Wformat-truncation`.
+
+#### Freeze pin hardware (`CoreConfig.h`)
+- **`static_assert`** che congela le assegnazioni critiche: **D1=GPIO28, D2=GPIO21, DONE=GPIO23, MODE=GPIO29**.
+- Nuove costanti timing: `CORE_TPL_DONE_PULSE_MS`, `CORE_TPL_DONE_GAP_MS`, `CORE_MODE_POLL_MS`, `CORE_MODE_EXIT_DEBOUNCE_MS`, `CORE_REC_STOP_DEBOUNCE_MS`.
+
+### Build
+- **`main/CMakeLists.txt`**: aggiunto **`-Wno-missing-field-initializers`** (oltre a `-Wno-error=...` già presenti) per silenziare il rumore dei designated-initializer parziali sulle struct SDK (esp_capture/esp_muxer). Build pulita.
+
+### Note tecniche
+- **AES confermato hardware**: `CONFIG_MBEDTLS_HARDWARE_AES=y` + `MBEDTLS_AES_USE_INTERRUPT=y`; su ESP32-P4 `esp_aes_crypt_ctr` cifra l'intero buffer via **DMA** in un'unica operazione.
+- Individuato che il tempo di salvataggio elevato dipende dal **doppio passaggio su SD** (mux plain `.tmp` → rilettura → riscrittura cifrata), non dall'AES: ottimizzazione "cifratura al volo" pianificata per una release successiva.
+
 ## [0.3.1] - 2026-06-25 — Patch: registrazione web, video cifrati MRBI, performance I/O
 
 **Commit:** `b9329ae6c5df8848f80cf2babceac11d240dcb86`  

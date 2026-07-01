@@ -20,6 +20,11 @@ typedef struct {
 // Registra fino a D2: capture immediato in PSRAM, SD in parallelo, mux MP4 su SD
 bool core_recorder_run_session(const core_settings_t *settings);
 
+// Recupera i .mp4.tmp orfani (registrazioni interrotte da spegnimento improvviso):
+// cifra e finalizza quelli validi, elimina quelli corrotti. Ritorna il numero di
+// file rimossi/recuperati. Da chiamare quando NON si sta registrando (config mode).
+int core_recorder_recover_tmp_files(const core_settings_t *settings);
+
 // Registrazione manuale da Web (stop esplicito, nessun DONE TPL)
 bool core_recorder_manual_start(const core_settings_t *settings);
 bool core_recorder_manual_stop(void);

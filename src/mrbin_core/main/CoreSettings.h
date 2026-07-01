@@ -15,7 +15,12 @@ typedef struct {
     char     wifi_ssid[32];
     char     wifi_pass[64];
     uint32_t d2_post_delay_ms;  // default 5000
+    uint8_t  rec_gpio_start;    // GPIO attivazione registrazione (default D1 = 28)
+    uint8_t  rec_gpio_stop;     // GPIO stop registrazione (default D2 = 21)
 } core_settings_t;
+
+bool core_settings_rec_pins_valid(uint8_t start_gpio, uint8_t stop_gpio);
+void core_settings_rec_pins_set_defaults(core_settings_t *s);
 
 bool core_settings_init(void);
 bool core_settings_load(core_settings_t *out);

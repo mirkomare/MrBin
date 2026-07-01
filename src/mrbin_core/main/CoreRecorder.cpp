@@ -20,6 +20,7 @@
 #include "impl/esp_capture_video_v4l2_src.h"
 #include "impl/mp4_muxer.h"
 #include "esp_muxer.h"
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,7 +33,6 @@ static const char *TAG = "core_recorder";
 #define SD_PREP_DONE_BIT        BIT0
 #define H264_CODEC_SPEC_MAX     512
 #define REC_STATUS_LOG_MS       5000
-#define REC_D2_RELEASE_TIMEOUT_MS 30000
 #define REC_DRAIN_TIMEOUT_MS    1000
 #define MANUAL_REC_DONE_BIT     BIT0
 #define MANUAL_REC_TASK_STACK   12288
@@ -121,6 +121,8 @@ typedef struct {
 
 #define CORE_CRYPTO_FILE_HEADER   20   // MRBI (4) + IV (16)
 
+static bool recording_file_is_valid(const char *path);
+
 static bool plain_mp4_has_ftyp(const char *path) {
     FILE *fp = fopen(path, "rb");
     if (!fp) {
@@ -159,9 +161,15 @@ static bool encrypt_mp4_file(const char *plain_path, const char *enc_path, const
         return false;
     }
 
-    FILE *fout = fopen(enc_path, "wb");
+    // Cifratura atomica: scrive su <enc_path>.part e rinomina in .mp4 solo a fine OK.
+    // Così il file .mp4 finale non è mai visibile incompleto/0 byte.
+    char part_path[160];
+    snprintf(part_path, sizeof(part_path), "%s.part", enc_path);
+    remove(part_path);
+
+    FILE *fout = fopen(part_path, "wb");
     if (!fout) {
-        ESP_LOGE(TAG, "Creazione %s fallita (errno=%d)", enc_path, errno);
+        ESP_LOGE(TAG, "Creazione %s fallita (errno=%d)", part_path, errno);
         fclose(fin);
         return false;
     }
@@ -185,7 +193,7 @@ static bool encrypt_mp4_file(const char *plain_path, const char *enc_path, const
         file_io_buf_free(&fout_vbuf);
         fclose(fin);
         fclose(fout);
-        remove(enc_path);
+        remove(part_path);
         return false;
     }
 
@@ -198,7 +206,7 @@ static bool encrypt_mp4_file(const char *plain_path, const char *enc_path, const
         file_io_buf_free(&fout_vbuf);
         fclose(fin);
         fclose(fout);
-        remove(enc_path);
+        remove(part_path);
         return false;
     }
 
@@ -210,7 +218,7 @@ static bool encrypt_mp4_file(const char *plain_path, const char *enc_path, const
         file_io_buf_free(&fout_vbuf);
         fclose(fin);
         fclose(fout);
-        remove(enc_path);
+        remove(part_path);
         return false;
     }
 
@@ -220,7 +228,7 @@ static bool encrypt_mp4_file(const char *plain_path, const char *enc_path, const
         file_io_buf_free(&fout_vbuf);
         fclose(fin);
         fclose(fout);
-        remove(enc_path);
+        remove(part_path);
         return false;
     }
 
@@ -245,7 +253,15 @@ static bool encrypt_mp4_file(const char *plain_path, const char *enc_path, const
     fclose(fout);
 
     if (!ok) {
-        remove(enc_path);
+        remove(part_path);
+        return false;
+    }
+
+    // Rinomina atomica: il .mp4 finale compare solo ora, completo e valido.
+    remove(enc_path);
+    if (rename(part_path, enc_path) != 0) {
+        ESP_LOGE(TAG, "Rename %s -> %s fallito (errno=%d)", part_path, enc_path, errno);
+        remove(part_path);
         return false;
     }
 
@@ -253,6 +269,93 @@ static bool encrypt_mp4_file(const char *plain_path, const char *enc_path, const
     ESP_LOGI(TAG, "Cifratura MP4 %ld bytes in %lld ms (buf=%u)",
              (long)st.st_size, (long long)((esp_timer_get_time() - t0) / 1000), (unsigned)io_buf_size);
     return true;
+}
+
+int core_recorder_recover_tmp_files(const core_settings_t *settings) {
+    if (!settings) {
+        return 0;
+    }
+    if (!core_sd_is_mounted() && !core_sd_init()) {
+        ESP_LOGW(TAG, "Recupero .tmp: SD non montata");
+        return 0;
+    }
+
+    DIR *root = opendir(CORE_SD_MOUNT_POINT);
+    if (!root) {
+        ESP_LOGW(TAG, "Recupero .tmp: opendir %s fallito (errno=%d)", CORE_SD_MOUNT_POINT, errno);
+        return 0;
+    }
+
+    int recovered = 0;
+    int removed = 0;
+    struct dirent *day;
+    while ((day = readdir(root)) != nullptr) {
+        if (day->d_name[0] == '.' || day->d_name[0] == 0) {
+            continue;
+        }
+        char daypath[96];
+        snprintf(daypath, sizeof(daypath), "%s/%.64s", CORE_SD_MOUNT_POINT, day->d_name);
+        struct stat dst;
+        if (stat(daypath, &dst) != 0 || !S_ISDIR(dst.st_mode)) {
+            continue;
+        }
+
+        // Raccolgo prima i nomi .mp4.tmp, poi li elaboro: evita di modificare la
+        // directory mentre la sto leggendo (comportamento fragile su FATFS).
+        DIR *sub = opendir(daypath);
+        if (!sub) {
+            continue;
+        }
+        char (*names)[80] = (char (*)[80])calloc(32, 80);
+        int n_names = 0;
+        if (names) {
+            struct dirent *f;
+            while (n_names < 32 && (f = readdir(sub)) != nullptr) {
+                size_t len = strlen(f->d_name);
+                if (len >= 8 && len < 80 && strcmp(f->d_name + len - 8, ".mp4.tmp") == 0) {
+                    snprintf(names[n_names], 80, "%s", f->d_name);
+                    n_names++;
+                }
+            }
+        }
+        closedir(sub);
+        if (!names) {
+            continue;
+        }
+
+        for (int i = 0; i < n_names; ++i) {
+            char tmp_path[180];
+            snprintf(tmp_path, sizeof(tmp_path), "%.96s/%.78s", daypath, names[i]);
+            char final_path[180];
+            snprintf(final_path, sizeof(final_path), "%.*s",
+                     (int)(strlen(tmp_path) - 4), tmp_path);  // toglie ".tmp"
+
+            if (settings->aes_key_valid && recording_file_is_valid(tmp_path) &&
+                plain_mp4_has_ftyp(tmp_path)) {
+                if (encrypt_mp4_file(tmp_path, final_path, settings->aes_key)) {
+                    ESP_LOGI(TAG, "Recuperato orfano: %s", final_path);
+                    recovered++;
+                } else {
+                    ESP_LOGW(TAG, "Recupero fallito, elimino: %s", tmp_path);
+                    remove(tmp_path);
+                    removed++;
+                }
+            } else {
+                ESP_LOGW(TAG, "TMP corrotto/incompleto, elimino: %s", tmp_path);
+                remove(tmp_path);
+                removed++;
+            }
+        }
+        free(names);
+    }
+    closedir(root);
+
+    if (recovered || removed) {
+        ESP_LOGI(TAG, "Recupero .tmp: %d recuperati, %d eliminati", recovered, removed);
+    } else {
+        ESP_LOGI(TAG, "Recupero .tmp: nessun file orfano");
+    }
+    return recovered + removed;
 }
 
 static int storage_path_handler(esp_muxer_slice_info_t *info, void *ctx) {
@@ -587,8 +690,8 @@ static bool manual_should_stop(void) {
     return s_manual_stop;
 }
 
-static bool d2_should_stop(void) {
-    return core_gpio_is_d2_end();
+static bool rec_stop_should_stop(void) {
+    return core_gpio_is_rec_stop_triggered();
 }
 
 static bool recorder_finalize_save(const core_settings_t *settings, const sd_prep_ctx_t *sd_ctx,
@@ -675,7 +778,7 @@ static bool recorder_finalize_save(const core_settings_t *settings, const sd_pre
 }
 
 static bool recorder_run_core(const core_settings_t *settings, recorder_should_stop_fn_t should_stop,
-                              bool wait_d2_release, bool async_encrypt, const char *stop_label,
+                              bool async_encrypt, const char *stop_label,
                               char *out_path, size_t out_path_len) {
     if (!settings || !should_stop) {
         return false;
@@ -692,7 +795,7 @@ static bool recorder_run_core(const core_settings_t *settings, recorder_should_s
         return false;
     }
 
-    xTaskCreate(sd_prep_task, "sd_prep", CORE_SD_PREP_TASK_STACK, &sd_ctx, CORE_SD_PREP_TASK_PRIO, nullptr);
+    core_gpio_rec_stop_session_begin();
 
     recorder_capture_t capture = {};
     core_h264_buffer_t psram_buf;
@@ -707,27 +810,17 @@ static bool recorder_run_core(const core_settings_t *settings, recorder_should_s
                  (long long)((esp_timer_get_time() - boot_t0) / 1000));
     }
 
+    xTaskCreate(sd_prep_task, "sd_prep", CORE_SD_PREP_TASK_STACK, &sd_ctx, CORE_SD_PREP_TASK_PRIO, nullptr);
+
     recorder_muxer_t muxer = {};
     bool sd_prep_done = false;
     bool muxer_was_active = false;
     uint32_t dropped_frames = 0;
     int64_t last_status_log = esp_timer_get_time();
 
-    if (wait_d2_release && core_gpio_is_d2_end()) {
-        ESP_LOGW(TAG, "D2 già attivo (GPIO%d LOW) — attendo rilascio prima di registrare", CORE_GPIO_D2_END);
-        int64_t wait_until = esp_timer_get_time() + ((int64_t)REC_D2_RELEASE_TIMEOUT_MS * 1000);
-        while (core_gpio_is_d2_end() && esp_timer_get_time() < wait_until) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        if (core_gpio_is_d2_end()) {
-            ESP_LOGE(TAG, "D2 resta attivo — sessione senza frame");
-        } else {
-            ESP_LOGI(TAG, "D2 rilasciato — avvio loop registrazione");
-        }
-    }
-
     ESP_LOGI(TAG, "Registrazione attiva — stop: %s", stop_label ? stop_label : "?");
     while (!should_stop()) {
+        core_gpio_log_pin_edges();
         if (capture_ok) {
             recorder_process_frame(&capture, &muxer, &psram_buf, &dropped_frames);
         }
@@ -795,7 +888,7 @@ static bool recorder_run_core(const core_settings_t *settings, recorder_should_s
 static void manual_rec_task(void *arg) {
     manual_rec_arg_t *ctx = (manual_rec_arg_t *)arg;
     char saved_path[128] = {0};
-    bool saved = recorder_run_core(&ctx->settings, manual_should_stop, false, true, "web stop",
+    bool saved = recorder_run_core(&ctx->settings, manual_should_stop, true, "web stop",
                                    saved_path, sizeof(saved_path));
     s_manual_last_saved = saved;
     if (saved) {
@@ -893,7 +986,7 @@ bool core_recorder_run_session(const core_settings_t *settings) {
     }
 
     core_gpio_log_inputs();
-    bool saved = recorder_run_core(settings, d2_should_stop, true, false, "D2 GPIO",
+    bool saved = recorder_run_core(settings, rec_stop_should_stop, false, "stop GPIO",
                                      nullptr, 0);
     core_gpio_hold_tpl_done(settings->d2_post_delay_ms);
     return saved;
