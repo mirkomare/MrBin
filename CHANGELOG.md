@@ -4,6 +4,48 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 **Versioning:** se non indicato diversamente, incrementare sempre l’**ultimo numero** (patch: `0.3.0` → `0.3.1`). Minor/major solo su richiesta esplicita.
 
+## [0.5.3] - 2026-07-02 — Patch: download/play MP4, handoff live→registrazione web
+
+**Commit:** `ba7bc473100801d9088333006198752ba81653a1`  
+**Data/ora release:** 2026-07-02 01:07:19 +0200  
+**Tag:** `v0.5.3`  
+**Stato:** **Stable** (patch su 0.5.2) — download e riproduzione browser dei file cifrati, registrazione manuale da web dopo live, MP4 con moov in testa.  
+**Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
+**Versione firmware:** `src/mrbin_core/VERSION` → `0.5.3`
+
+### Contesto
+
+Dopo la 0.5.2 (live CONFIG ok) restavano problemi su **download/play** dei MP4 cifrati (decifratura non allineata al writer `enc_writer`, HTTP chunked senza Range) e sulla **registrazione manuale web** dopo il live (race camera / `V4L2 Fail to open device`). Questa patch consolida crypto stream, HTTP video e handoff live→rec.
+
+### Aggiunto
+
+#### Stream MP4 decifrato (`CoreWeb`)
+- Decifratura on-the-fly su `/videos/download` e `/play` (salta header `[MRBI][IV]`, body AES-128-CTR).
+- Risposta HTTP a **Content-Length fisso** + **`Accept-Ranges: bytes`** + supporto **Range 206** (browser `<video>` e seek su `moov`).
+- Auto-rilevamento schema decifra: `crypt_at` (enc_writer) vs `crypt_buffer_legacy` (vecchi file).
+- Log diagnostico header **`ftyp`** post-decifra; errori HTTP espliciti.
+
+#### Handoff live ↔ registrazione (`CoreLive`, `CoreWeb`, `CoreRecorder`)
+- `core_live_wait_idle()`: attende fine worker live prima di avviare registrazione web.
+- Sequenza stop live → idle → deinit camera → delay → recorder; retry init camera.
+
+#### Crypto (`CoreCrypto`)
+- `crypt_buffer` allineato a `crypt_at`; schema **legacy** per file pre-dual-job.
+
+### Modificato
+- Muxer: **`moov_before_mdat = true`** (file nuovi, play browser).
+- `core_live_stop` non deinit camera (niente race con recorder).
+
+### Corretto
+- Download/play illeggibile (CTR mismatch / HTTP senza Range).
+- Registrazione web «non salvata» dopo live (`V4L2 Fail to open device`).
+
+### Note
+- Registrazione web e PIR: **1280×960 @ 12 fps**; live MJPEG solo anteprima **800×640@10**.
+- In CONFIG RAM limitata: possibili warning `BOX_W Malloc ram cache` (qualità video da affinare).
+
+---
+
 ## [0.5.2] - 2026-07-02 — Patch: live CONFIG, boot dual-mode PIR/CONFIG, settings web
 
 **Commit:** `a7c9f69669f1c3e2dc891049b240cbc07ebb6c18`  
