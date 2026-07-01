@@ -6,8 +6,8 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 ## [0.5.0] - 2026-07-01 — Minor STABLE: video 1080p nativo, cifratura real-time affidabile, PTS a tempo reale, stop pin robusto
 
-**Commit:** `__COMMIT_HASH__`  
-**Data/ora release:** `__COMMIT_DATE__`  
+**Commit:** `0a52ab573cc716d636b8bc9b88972b268c8fa0b1`  
+**Data/ora release:** 2026-07-01 12:35:37 +0200  
 **Tag:** `v0.5.0`  
 **Stato:** **Stable** — pipeline di registrazione consolidata: qualità video piena, download dei file cifrati funzionante, velocità di riproduzione corretta, rilevamento dello stop affidabile. Validata sul campo dall'utente ("sembra perfetta").  
 **Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
