@@ -4,6 +4,53 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 **Versioning:** se non indicato diversamente, incrementare sempre l’**ultimo numero** (patch: `0.3.0` → `0.3.1`). Minor/major solo su richiesta esplicita.
 
+## [0.5.4] - 2026-07-02 — Patch: fix encoder OOM (0 frame), settings video web, LED stato, diagnostica camera
+
+**Commit:** `b011d59b58b5aac4a64f35c8ccc1451bf3db195e`  
+**Data/ora release:** 2026-07-02 04:10:50 +0200  
+**Tag:** `v0.5.4`  
+**Stato:** **Stable** (patch su 0.5.3) — registrazione web/PIR di nuovo funzionante (fix OOM encoder H264), risoluzione/fps configurabili da web, LED di stato affidabile.  
+**Target:** Waveshare ESP32-P4-WIFI6-M (ESP-IDF 5.5.4, esp32p4 rev v1.x)  
+**Versione firmware:** `src/mrbin_core/VERSION` → `0.5.4`
+
+### Contesto
+
+Dopo la 0.5.3 la registrazione web falliva sistematicamente con **0 frame catturati**: l'encoder H264 hardware alloca i buffer di lavoro (reference frame + deblocking, ~1.5-3 MB) solo **al primo frame codificato**, ma il ring di registrazione si prendeva prima il **95% della PSRAM libera** (21+ MB) → `H264_ENC.HW.SET: No memory for data`, pipeline morta, nessun file su SD. In parallelo: richiesta risoluzione/fps configurabili da web, LED di stato non reattivo, e diagnostica camera dopo i falsi allarmi hardware (devboard/camera sostituite).
+
+### Aggiunto
+
+#### Impostazioni video registrazione (`CoreSettings`, `CoreWeb`)
+- Nuova pagina **`/rec_video`**: risoluzione (width×height) e frame rate registrazione configurabili, persistiti in **NVS** con validazione e normalizzazione (limiti in `CoreConfig.h`).
+- **Bitrate e GOP derivati** automaticamente dai parametri configurati (`core_settings_video_bitrate/gop/frame_ms`).
+- Link "Reg. video" nella navigazione di tutte le pagine; `/live` mostra la risoluzione di registrazione corrente.
+- `max_uri_handlers` 18 → 20.
+
+#### Prime pipeline encoder (`CoreRecorder`)
+- **`recorder_capture_prime()`**: dopo l'avvio del capture e **prima** di dimensionare il ring PSRAM, attende il primo frame H264 (timeout `CORE_REC_PRIME_TIMEOUT_MS` = 4 s). Forza l'allocazione dei buffer encoder/PPA a PSRAM ancora libera; se la pipeline non produce frame la registrazione fallisce subito con errore chiaro invece di girare a vuoto.
+
+#### Diagnostica camera (`CoreVideo`)
+- **Scan I2C** del bus SCCB (GPIO7/8) al fallimento dell'init camera: logga ogni indirizzo che risponde (0x36 = OV5647 atteso, 0x30 = possibile SC2336 con driver non abilitato, nessun ACK = problema elettrico flat/alimentazione).
+
+#### LED di stato (`CoreStatusLed`)
+- Scrittura GPIO **immediata** su `set_mode`/`notify_rec_stop` (il task gestisce solo blink/pulse).
+- Pulse singolo su **SD pronta** durante registrazione (`core_status_led_notify_sd_ready`).
+- **`core_status_led_end_recording()`**: ripristino stato corretto post-registrazione (OFF in PIR, AP/STA in CONFIG).
+- Priorità task LED **6** (sopra capture/recorder), `led_ensure_output()` + `gpio_hold_dis()` contro l'isolamento GPIO.
+
+### Modificato
+- `CoreRecorder`: parametri video **runtime da NVS** (width/height/fps/bitrate/GOP) al posto delle costanti; PTS sintetici allineati agli fps configurati; burst iniziale all'apertura del muxer (drena il backlog del ring).
+- `CoreConfig.h`: `CORE_MUXER_RAM_CACHE_BYTES` 768K → **256K** (OOM sotto capture+WiFi); default e limiti video; `CORE_REC_PRIME_TIMEOUT_MS`.
+
+### Corretto
+- **Registrazione web/PIR con 0 frame** (`H264_ENC.HW.SET: No memory for data`): encoder OOM per ordine di allocazione ring-vs-encoder — ora il prime avviene prima del ring. Verificato: 94 frame catturati → 94 su SD, file cifrato 2.1 MB valido.
+- Log diagnostici su `esp_muxer_add_video_packet` / `enc_writer_write` falliti (rate-limited 1/s).
+
+### Note
+- Test verificato: registrazione web 1280×720@12, stop utente, flush ring→SD in ~4.4 s, `File salvato cifrato ... 94 frame mux`.
+- La scheda è sparita due volte dal bus USB (COM18 de-enumerata) restando operativa su WiFi: sospetto cavo/porta/alimentazione da tenere d'occhio.
+
+---
+
 ## [0.5.3] - 2026-07-02 — Patch: download/play MP4, handoff live→registrazione web
 
 **Commit:** `ba7bc473100801d9088333006198752ba81653a1`  
