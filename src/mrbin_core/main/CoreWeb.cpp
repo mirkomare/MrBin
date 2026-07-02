@@ -90,7 +90,7 @@ fieldset.gpio-cfg legend{font-weight:600;padding:0 6px}
 .fmt-btn{background:#c33;color:#fff}
 .fmt-btn:disabled{opacity:.6;cursor:wait}
 </style></head><body>
-<nav><a href="/settings">Impostazioni</a><a href="/live">Live</a><a href="/videos">Video</a><a href="/logout">Logout</a></nav>
+<nav><a href="/settings">Impostazioni</a><a href="/live">Live</a><a href="/rec_video">Reg. video</a><a href="/videos">Video</a><a href="/logout">Logout</a></nav>
 <h2>Impostazioni CORE</h2>
 )HTML";
 
@@ -142,7 +142,7 @@ ul{list-style:none;padding:0;margin:0}
 .vid-pending{color:#888;font-style:italic}
 .sd-warn{padding:12px 14px;margin:12px 0;border-radius:6px;background:#fff8e6;border:1px solid #f0d080;color:#664400}
 </style></head><body>
-<nav><a href="/settings">Impostazioni</a><a href="/live">Live</a><a href="/videos">Video</a><a href="/logout">Logout</a></nav>
+<nav><a href="/settings">Impostazioni</a><a href="/live">Live</a><a href="/rec_video">Reg. video</a><a href="/videos">Video</a><a href="/logout">Logout</a></nav>
 <h2>Registrazioni SD</h2>
 )HTML";
 
@@ -164,8 +164,63 @@ nav a{margin-right:12px}
 .rec-status.rec-on{color:#c33;font-weight:bold}
 .rec-overlay{color:#ccc;font-size:18px;padding:40px}
 </style></head><body>
-<nav><a href="/settings">Impostazioni</a><a href="/live">Live</a><a href="/videos">Video</a><a href="/logout">Logout</a></nav>
+<nav><a href="/settings">Impostazioni</a><a href="/live">Live</a><a href="/rec_video">Reg. video</a><a href="/videos">Video</a><a href="/logout">Logout</a></nav>
 <h2>Live camera</h2>
+)HTML";
+
+static const char *REC_VIDEO_HTML_HEAD = R"HTML(
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Registrazione video</title>
+<style>
+body{font-family:sans-serif;max-width:640px;margin:24px auto}
+input,button,select{padding:8px;margin:4px 0;width:100%;box-sizing:border-box}
+nav a{margin-right:12px}
+fieldset{border:1px solid #ccc;border-radius:8px;padding:12px 16px;margin:16px 0}
+fieldset legend{font-weight:600;padding:0 6px}
+.hint{font-size:14px;color:#555;margin:8px 0;line-height:1.45}
+.alert{padding:12px 14px;margin:12px 0;border-radius:6px}
+.alert.ok{background:#e8f7ea;border:1px solid #8fd19a;color:#1b5e20}
+.alert.err{background:#fdecea;border:1px solid #f5a8a0;color:#8a1f11}
+.stats{background:#eef3ff;border:1px solid #c5d4f5;padding:10px 12px;border-radius:6px;font-size:14px;margin:12px 0}
+.row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+@media(max-width:520px){.row{grid-template-columns:1fr}}
+</style></head><body>
+<nav><a href="/settings">Impostazioni</a><a href="/live">Live</a><a href="/rec_video">Reg. video</a><a href="/videos">Video</a><a href="/logout">Logout</a></nav>
+<h2>Registrazione video (H264 SD)</h2>
+)HTML";
+
+static const char *REC_VIDEO_FORM_TAIL = R"HTML(
+<p class="hint">Il sensore OV5647 cattura nativamente 1280×960; risoluzioni diverse vengono scalate dal pipeline ISP.
+Valori pari obbligatori. Si applica al prossimo avvio registrazione (PIR o web).</p>
+<form method="POST" action="/rec_video" id="videoForm">
+<fieldset>
+<legend>Preset rapidi</legend>
+<label>Preset</label>
+<select id="preset" onchange="applyPreset()">
+<option value="">— personalizzato —</option>
+<option value="1280,960,12">1280×960 @ 12 fps (default)</option>
+<option value="1280,720,12">1280×720 @ 12 fps</option>
+<option value="960,720,10">960×720 @ 10 fps</option>
+<option value="640,480,8">640×480 @ 8 fps</option>
+</select>
+</fieldset>
+<div class="row">
+<label>Larghezza (px)<input name="video_w" id="video_w" type="number" min="%u" max="%u" step="2" value="%u" required></label>
+<label>Altezza (px)<input name="video_h" id="video_h" type="number" min="%u" max="%u" step="2" value="%u" required></label>
+<label>Frame rate (fps)<input name="video_fps" id="video_fps" type="number" min="%u" max="%u" value="%u" required></label>
+</div>
+<button type="submit">Salva impostazioni video</button>
+</form>
+<script>
+function applyPreset(){
+  var v=document.getElementById('preset').value;
+  if(!v)return;
+  var p=v.split(',');
+  document.getElementById('video_w').value=p[0];
+  document.getElementById('video_h').value=p[1];
+  document.getElementById('video_fps').value=p[2];
+}
+</script>
+</body></html>
 )HTML";
 
 static const char *LIVE_PAGE_OK = R"HTML(
@@ -360,11 +415,15 @@ static esp_err_t handle_live_record_stop(httpd_req_t *req) {
 static esp_err_t handle_live_get(httpd_req_t *req) {
     if (!is_authed(req)) return send_redirect(req, "/");
 
+    uint16_t rec_w = s_settings ? s_settings->video_width : (uint16_t)CORE_VIDEO_WIDTH_DEFAULT;
+    uint16_t rec_h = s_settings ? s_settings->video_height : (uint16_t)CORE_VIDEO_HEIGHT_DEFAULT;
+    uint8_t rec_fps = s_settings ? s_settings->video_fps : (uint8_t)CORE_VIDEO_FPS_DEFAULT;
+
     char body[8192];
     char tail[6144];
     snprintf(tail, sizeof(tail), LIVE_PAGE_OK,
              CORE_LIVE_WIDTH, CORE_LIVE_HEIGHT, CORE_LIVE_FPS,
-             CORE_VIDEO_WIDTH, CORE_VIDEO_HEIGHT, CORE_VIDEO_FPS);
+             rec_w, rec_h, rec_fps);
     snprintf(body, sizeof(body), "%s%s", LIVE_HTML_HEAD, tail);
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
@@ -773,6 +832,94 @@ static esp_err_t handle_settings_post(httpd_req_t *req) {
         return send_redirect(req, "/settings?saved=0");
     }
     return send_redirect(req, saved ? "/settings?saved=1" : "/settings?saved=0");
+}
+
+static esp_err_t handle_rec_video_get(httpd_req_t *req) {
+    if (!is_authed(req)) return send_redirect(req, "/");
+
+    uint16_t vw = s_settings ? s_settings->video_width : (uint16_t)CORE_VIDEO_WIDTH_DEFAULT;
+    uint16_t vh = s_settings ? s_settings->video_height : (uint16_t)CORE_VIDEO_HEIGHT_DEFAULT;
+    uint8_t vf = s_settings ? s_settings->video_fps : (uint8_t)CORE_VIDEO_FPS_DEFAULT;
+
+    core_settings_t tmp = s_settings ? *s_settings : core_settings_t{};
+    if (!s_settings) {
+        core_settings_video_set_defaults(&tmp);
+    }
+    uint32_t bitrate = core_settings_video_bitrate(&tmp);
+    uint32_t gop = core_settings_video_gop(&tmp);
+
+    char flash[256] = {0};
+    char query[32] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char msg[8] = {0};
+        if (httpd_query_key_value(query, "saved", msg, sizeof(msg)) == ESP_OK) {
+            if (strcmp(msg, "1") == 0) {
+                snprintf(flash, sizeof(flash),
+                    "<div class='alert ok'>Impostazioni video salvate in NVS.</div>");
+            } else if (strcmp(msg, "0") == 0) {
+                snprintf(flash, sizeof(flash),
+                    "<div class='alert err'>Salvataggio fallito — verificare risoluzione (%u–%u × %u–%u px, pari) "
+                    "e frame rate (%u–%u fps).</div>",
+                    (unsigned)CORE_VIDEO_WIDTH_MIN, (unsigned)CORE_VIDEO_WIDTH_MAX,
+                    (unsigned)CORE_VIDEO_HEIGHT_MIN, (unsigned)CORE_VIDEO_HEIGHT_MAX,
+                    (unsigned)CORE_VIDEO_FPS_MIN, (unsigned)CORE_VIDEO_FPS_MAX);
+            }
+        }
+    }
+
+    char stats[256];
+    snprintf(stats, sizeof(stats),
+        "<div class='stats'>Attuale: <strong>%u×%u @ %u fps</strong> — "
+        "bitrate ~%.1f Mbps, GOP %lu frame (~%.1f s)</div>",
+        (unsigned)vw, (unsigned)vh, (unsigned)vf,
+        (double)bitrate / 1000000.0,
+        (unsigned long)gop,
+        vf > 0 ? (double)gop / (double)vf : 0.0);
+
+    char form[2048];
+    snprintf(form, sizeof(form), REC_VIDEO_FORM_TAIL,
+             (unsigned)CORE_VIDEO_WIDTH_MIN, (unsigned)CORE_VIDEO_WIDTH_MAX, (unsigned)vw,
+             (unsigned)CORE_VIDEO_HEIGHT_MIN, (unsigned)CORE_VIDEO_HEIGHT_MAX, (unsigned)vh,
+             (unsigned)CORE_VIDEO_FPS_MIN, (unsigned)CORE_VIDEO_FPS_MAX, (unsigned)vf);
+
+    char body[4096];
+    snprintf(body, sizeof(body), "%s%s%s%s", REC_VIDEO_HTML_HEAD, flash, stats, form);
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t handle_rec_video_post(httpd_req_t *req) {
+    if (!is_authed(req) || !s_settings) return send_redirect(req, "/");
+
+    char buf[512];
+    if (read_post_body(req, buf, sizeof(buf)) <= 0) {
+        return send_redirect(req, "/rec_video?saved=0");
+    }
+
+    char w_s[16] = {0}, h_s[16] = {0}, fps_s[8] = {0};
+    form_get_value(buf, "video_w", w_s, sizeof(w_s));
+    form_get_value(buf, "video_h", h_s, sizeof(h_s));
+    form_get_value(buf, "video_fps", fps_s, sizeof(fps_s));
+
+    uint16_t w = (uint16_t)atoi(w_s);
+    uint16_t h = (uint16_t)atoi(h_s);
+    uint8_t fps = (uint8_t)atoi(fps_s);
+
+    if (!core_settings_video_valid(w, h, fps)) {
+        ESP_LOGW(TAG, "Video NVS rifiutato: %ux%u@%u", (unsigned)w, (unsigned)h, (unsigned)fps);
+        return send_redirect(req, "/rec_video?saved=0");
+    }
+
+    s_settings->video_width = w;
+    s_settings->video_height = h;
+    s_settings->video_fps = fps;
+    core_settings_video_normalize(s_settings);
+
+    bool saved = core_settings_save(s_settings);
+    ESP_LOGI(TAG, "Video web: %ux%u@%u → %s",
+             (unsigned)s_settings->video_width, (unsigned)s_settings->video_height,
+             (unsigned)s_settings->video_fps, saved ? "OK" : "FAIL");
+    return send_redirect(req, saved ? "/rec_video?saved=1" : "/rec_video?saved=0");
 }
 
 static esp_err_t handle_format_sd(httpd_req_t *req) {
@@ -1265,7 +1412,8 @@ static esp_err_t handle_videos_watch(httpd_req_t *req) {
         ".btn-back{background:#555}.btn-back:hover{background:#444}"
         ".hint{color:#666;font-size:14px;margin-top:8px}"
         "</style></head><body>"
-        "<nav><a href=\"/videos\">Video</a><a href=\"/settings\">Impostazioni</a>"
+        "<nav><a href=\"/videos\">Video</a><a href=\"/rec_video\">Reg. video</a>"
+        "<a href=\"/settings\">Impostazioni</a><a href=\"/live\">Live</a>"
         "<a href=\"/logout\">Logout</a></nav>"
         "<h2>%s</h2>"
         "<video controls playsinline preload=\"auto\" src=\"/play?f=%s\"></video>"
@@ -1404,7 +1552,7 @@ static bool start_http_server(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CORE_WEB_PORT;
     config.stack_size = 32768;
-    config.max_uri_handlers = 18;
+    config.max_uri_handlers = 20;
     config.max_open_sockets = 7;
     config.lru_purge_enable = true;
 
@@ -1419,6 +1567,8 @@ static bool start_http_server(void) {
         {"/logout", HTTP_GET, handle_logout, nullptr},
         {"/settings", HTTP_GET, handle_settings_get, nullptr},
         {"/settings", HTTP_POST, handle_settings_post, nullptr},
+        {"/rec_video", HTTP_GET, handle_rec_video_get, nullptr},
+        {"/rec_video", HTTP_POST, handle_rec_video_post, nullptr},
         {"/format_sd", HTTP_POST, handle_format_sd, nullptr},
         {"/live", HTTP_GET, handle_live_get, nullptr},
         {"/live/stream", HTTP_GET, handle_live_stream, nullptr},

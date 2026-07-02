@@ -14,9 +14,16 @@ static SemaphoreHandle_t s_mode_mtx = nullptr;
 static core_status_led_mode_t s_mode = CORE_LED_OFF;
 static core_status_led_mode_t s_restore_mode = CORE_LED_OFF;
 static volatile bool s_rec_stop_pending = false;
+static volatile bool s_sd_ready_pulse = false;
 static const int s_off_level = CORE_STATUS_LED_ON_LEVEL ? 0 : 1;
 
+static void led_ensure_output(void) {
+    gpio_set_direction(CORE_GPIO_STATUS_LED, GPIO_MODE_OUTPUT);
+    gpio_hold_dis(CORE_GPIO_STATUS_LED);
+}
+
 static void led_write(int level) {
+    led_ensure_output();
     gpio_set_level(CORE_GPIO_STATUS_LED, level);
 }
 
@@ -33,6 +40,21 @@ static void led_set_mode_locked(core_status_led_mode_t mode) {
     if (s_mode_mtx && xSemaphoreTake(s_mode_mtx, portMAX_DELAY) == pdTRUE) {
         s_mode = mode;
         xSemaphoreGive(s_mode_mtx);
+    }
+}
+
+static void led_apply_steady(core_status_led_mode_t mode) {
+    switch (mode) {
+    case CORE_LED_RECORDING:
+        led_write(CORE_STATUS_LED_ON_LEVEL);
+        break;
+    case CORE_LED_SAVING:
+        led_write(CORE_STATUS_LED_ON_LEVEL);
+        break;
+    case CORE_LED_OFF:
+    default:
+        led_write(s_off_level);
+        break;
     }
 }
 
@@ -71,8 +93,12 @@ static void led_task(void *) {
         }
 
         case CORE_LED_RECORDING:
+            if (s_sd_ready_pulse) {
+                s_sd_ready_pulse = false;
+                led_pulse_ms(CORE_STATUS_LED_D2_PULSE_MS);
+            }
             led_write(CORE_STATUS_LED_ON_LEVEL);
-            vTaskDelay(pdMS_TO_TICKS(200));
+            vTaskDelay(pdMS_TO_TICKS(500));
             break;
 
         case CORE_LED_D2_DETECT: {
@@ -89,11 +115,7 @@ static void led_task(void *) {
             }
             core_status_led_mode_t final_mode = s_rec_stop_pending ? CORE_LED_SAVING : restore;
             led_set_mode_locked(final_mode);
-            if (final_mode == CORE_LED_RECORDING) {
-                led_write(CORE_STATUS_LED_ON_LEVEL);
-            } else {
-                led_write(s_off_level);
-            }
+            led_apply_steady(final_mode);
             vTaskDelay(pdMS_TO_TICKS(50));
             break;
         }
@@ -129,6 +151,7 @@ bool core_status_led_init(void) {
         ESP_LOGE(TAG, "GPIO%d config fallita: %s", CORE_GPIO_STATUS_LED, esp_err_to_name(err));
         return false;
     }
+    gpio_hold_dis(CORE_GPIO_STATUS_LED);
     led_write(s_off_level);
 
     s_mode_mtx = xSemaphoreCreateMutex();
@@ -137,28 +160,38 @@ bool core_status_led_init(void) {
         return false;
     }
 
-    if (xTaskCreate(led_task, "status_led", 2048, nullptr, 2, &s_led_task) != pdPASS) {
+    if (xTaskCreate(led_task, "status_led", CORE_STATUS_LED_TASK_STACK, nullptr,
+                    CORE_STATUS_LED_TASK_PRIO, &s_led_task) != pdPASS) {
         ESP_LOGE(TAG, "task LED fallita");
         vSemaphoreDelete(s_mode_mtx);
         s_mode_mtx = nullptr;
         return false;
     }
 
-    ESP_LOGI(TAG, "LED GPIO%d pronto", CORE_GPIO_STATUS_LED);
+    ESP_LOGI(TAG, "LED GPIO%d pronto (task prio %d)", CORE_GPIO_STATUS_LED, CORE_STATUS_LED_TASK_PRIO);
     return true;
 }
 
 void core_status_led_set_mode(core_status_led_mode_t mode) {
     if (!s_mode_mtx) {
+        ESP_LOGW(TAG, "set_mode(%d) ignorato — LED non inizializzato", (int)mode);
         return;
     }
     if (xSemaphoreTake(s_mode_mtx, portMAX_DELAY) == pdTRUE) {
         if (mode == CORE_LED_RECORDING) {
             s_rec_stop_pending = false;
+            if (s_mode != CORE_LED_RECORDING && s_mode != CORE_LED_SAVING &&
+                s_mode != CORE_LED_D2_DETECT) {
+                s_restore_mode = s_mode;
+            }
+        } else if (mode == CORE_LED_AP || mode == CORE_LED_ERROR ||
+                   mode == CORE_LED_STA_CONNECTED) {
+            s_restore_mode = mode;
         }
         s_mode = mode;
         xSemaphoreGive(s_mode_mtx);
     }
+    led_apply_steady(mode);
 }
 
 void core_status_led_notify_sta_connected(void) {
@@ -167,6 +200,7 @@ void core_status_led_notify_sta_connected(void) {
 
 void core_status_led_notify_d2_detected(void) {
     if (!s_mode_mtx) {
+        ESP_LOGW(TAG, "notify_d2 ignorato — LED non inizializzato");
         return;
     }
     if (xSemaphoreTake(s_mode_mtx, portMAX_DELAY) == pdTRUE) {
@@ -176,6 +210,7 @@ void core_status_led_notify_d2_detected(void) {
         }
         xSemaphoreGive(s_mode_mtx);
     }
+    ESP_LOGI(TAG, "LED: feedback D2 (2 lampeggi)");
 }
 
 void core_status_led_notify_rec_stop(void) {
@@ -190,4 +225,28 @@ void core_status_led_notify_rec_stop(void) {
         }
         xSemaphoreGive(s_mode_mtx);
     }
+    led_apply_steady(CORE_LED_SAVING);
+    ESP_LOGI(TAG, "LED: modalità salvataggio SD (lampeggio lento)");
+}
+
+void core_status_led_notify_sd_ready(void) {
+    core_status_led_mode_t mode = led_get_mode();
+    if (mode == CORE_LED_RECORDING || mode == CORE_LED_SAVING) {
+        s_sd_ready_pulse = true;
+        ESP_LOGI(TAG, "LED: SD pronta (1 lampeggio in registrazione)");
+    }
+}
+
+void core_status_led_end_recording(bool config_session) {
+    core_status_led_mode_t next = CORE_LED_OFF;
+    if (config_session) {
+        if (s_restore_mode == CORE_LED_AP || s_restore_mode == CORE_LED_STA_CONNECTED ||
+            s_restore_mode == CORE_LED_ERROR) {
+            next = s_restore_mode;
+        } else {
+            next = CORE_LED_AP;
+        }
+    }
+    s_rec_stop_pending = false;
+    core_status_led_set_mode(next);
 }

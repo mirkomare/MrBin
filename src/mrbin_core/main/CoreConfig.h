@@ -36,24 +36,39 @@ static_assert(CORE_GPIO_MODE_CFG == GPIO_NUM_29, "PIN CONGELATO: MODE deve resta
 #define CORE_STATUS_LED_SAVING_ON_MS    100
 #define CORE_STATUS_LED_SAVING_OFF_MS   400
 #define CORE_GPIO_STOP_POLL_PRIO        8   // sopra capture/recorder: D2 sempre campionato
+#define CORE_STATUS_LED_TASK_PRIO       6   // sopra capture/recorder: feedback visivo affidabile
+#define CORE_STATUS_LED_TASK_STACK      3072
 
 // --- Rete / Web ---
 #define CORE_WEB_PORT       1510
 
-// --- Video ---
-// 1280×960 binning OV5647 (RAW10 @45fps sensore) — compromesso qualità/fluidità vs 1080p.
-#define CORE_VIDEO_WIDTH    1280
-#define CORE_VIDEO_HEIGHT   960
-#define CORE_VIDEO_FPS      12    // vid_fps_cvt in pipeline — non scartare frame H264 post-encode
-#define CORE_VIDEO_BITRATE  7000000   // 7 Mbps — SXGA con motion
-#define CORE_VIDEO_GOP      24        // IDR ogni ~2 s @ 12 fps
+// --- Video registrazione (default; configurabile da web /rec_video, salvato in NVS) ---
+#define CORE_VIDEO_WIDTH_DEFAULT    1280
+#define CORE_VIDEO_HEIGHT_DEFAULT   960
+#define CORE_VIDEO_FPS_DEFAULT      12
+#define CORE_VIDEO_WIDTH_MIN        640
+#define CORE_VIDEO_WIDTH_MAX        1280
+#define CORE_VIDEO_HEIGHT_MIN       480
+#define CORE_VIDEO_HEIGHT_MAX       960
+#define CORE_VIDEO_FPS_MIN          6
+#define CORE_VIDEO_FPS_MAX          15
+#define CORE_VIDEO_WIDTH            CORE_VIDEO_WIDTH_DEFAULT
+#define CORE_VIDEO_HEIGHT           CORE_VIDEO_HEIGHT_DEFAULT
+#define CORE_VIDEO_FPS              CORE_VIDEO_FPS_DEFAULT
+#define CORE_VIDEO_BITRATE_DEFAULT  7000000
+#define CORE_VIDEO_BITRATE_MIN      2000000
+#define CORE_VIDEO_BITRATE_MAX      10000000
+#define CORE_VIDEO_BITRATE          CORE_VIDEO_BITRATE_DEFAULT
+#define CORE_VIDEO_GOP_DEFAULT      24
+#define CORE_VIDEO_GOP              CORE_VIDEO_GOP_DEFAULT
 #define CORE_VIDEO_QP_MIN   20
 #define CORE_VIDEO_QP_MAX   36
 #define CORE_VIDEO_DEV_NAME "/dev/video0"
 #define CORE_REC_WARMUP_DROP_FRAMES     8    // config / registrazione manuale web
 #define CORE_REC_WARMUP_DROP_FRAMES_PIR 2    // PIR: pochi frame scartati, capture subito
 #define CORE_REC_SD_WAIT_MS             0    // capture subito; SD monta in parallelo
-#define CORE_VIDEO_FRAME_DUR_MS    (1000 / CORE_VIDEO_FPS)
+#define CORE_VIDEO_FRAME_DUR_MS_DEFAULT (1000 / CORE_VIDEO_FPS_DEFAULT)
+#define CORE_VIDEO_FRAME_DUR_MS         CORE_VIDEO_FRAME_DUR_MS_DEFAULT
 
 // --- Live preview (MJPEG HW — anteprima browser, risoluzione più bassa della registrazione) ---
 #define CORE_LIVE_WIDTH     800
@@ -114,11 +129,12 @@ static_assert(CORE_GPIO_MODE_CFG == GPIO_NUM_29, "PIN CONGELATO: MODE deve resta
 #define CORE_REC_SD_TASK_STACK        8192
 #define CORE_REC_CAPTURE_TASK_PRIO    5
 #define CORE_REC_SD_TASK_PRIO         7     // SD priorità alta: svuota ring
+#define CORE_REC_PRIME_TIMEOUT_MS     4000 // attesa primo frame H264 (alloca buffer encoder prima del ring)
 #define CORE_H264_PSRAM_USE_PCT       95   // ring PSRAM post-pipeline
 #define CORE_H264_PSRAM_FLUSH_PCT     95   // legacy flush path (non usato in dual-job)
 #define CORE_H264_PSRAM_MIN_BYTES     (2U * 1024U * 1024U)
 #define CORE_PSRAM_TAIL_RESERVE_BYTES (512U * 1024U)
-#define CORE_MUXER_RAM_CACHE_BYTES  (768U * 1024U)   // cache muxer — batch write SD
+#define CORE_MUXER_RAM_CACHE_BYTES  (256U * 1024U)   // cache muxer interna (768K OOM sotto capture+WiFi)
 #define CORE_PSRAM_FLUSH_RESERVE_BYTES (CORE_MUXER_RAM_CACHE_BYTES + 128U * 1024U)
 #define CORE_REC_FLUSH_PTS_GAP_MS     500
 #define CORE_V4L2_BUF_COUNT         8

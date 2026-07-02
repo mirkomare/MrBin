@@ -50,11 +50,88 @@ bool core_settings_init(void) {
     return true;
 }
 
+void core_settings_video_set_defaults(core_settings_t *s) {
+    if (!s) {
+        return;
+    }
+    s->video_width = CORE_VIDEO_WIDTH_DEFAULT;
+    s->video_height = CORE_VIDEO_HEIGHT_DEFAULT;
+    s->video_fps = (uint8_t)CORE_VIDEO_FPS_DEFAULT;
+}
+
+bool core_settings_video_valid(uint16_t width, uint16_t height, uint8_t fps) {
+    if (width < CORE_VIDEO_WIDTH_MIN || width > CORE_VIDEO_WIDTH_MAX) {
+        return false;
+    }
+    if (height < CORE_VIDEO_HEIGHT_MIN || height > CORE_VIDEO_HEIGHT_MAX) {
+        return false;
+    }
+    if (fps < CORE_VIDEO_FPS_MIN || fps > CORE_VIDEO_FPS_MAX) {
+        return false;
+    }
+    if ((width & 1) || (height & 1)) {
+        return false;
+    }
+    return true;
+}
+
+void core_settings_video_normalize(core_settings_t *s) {
+    if (!s || !core_settings_video_valid(s->video_width, s->video_height, s->video_fps)) {
+        if (s) {
+            core_settings_video_set_defaults(s);
+        }
+    }
+}
+
+uint32_t core_settings_video_frame_ms(const core_settings_t *s) {
+    uint8_t fps = s ? s->video_fps : (uint8_t)CORE_VIDEO_FPS_DEFAULT;
+    if (fps == 0) {
+        fps = (uint8_t)CORE_VIDEO_FPS_DEFAULT;
+    }
+    return 1000U / (uint32_t)fps;
+}
+
+uint32_t core_settings_video_bitrate(const core_settings_t *s) {
+    if (!s) {
+        return CORE_VIDEO_BITRATE_DEFAULT;
+    }
+    uint64_t px = (uint64_t)s->video_width * (uint64_t)s->video_height * (uint64_t)s->video_fps;
+    uint64_t base_px = (uint64_t)CORE_VIDEO_WIDTH_DEFAULT * (uint64_t)CORE_VIDEO_HEIGHT_DEFAULT
+                       * (uint64_t)CORE_VIDEO_FPS_DEFAULT;
+    if (base_px == 0) {
+        return CORE_VIDEO_BITRATE_DEFAULT;
+    }
+    uint64_t bps = ((uint64_t)CORE_VIDEO_BITRATE_DEFAULT * px) / base_px;
+    if (bps < CORE_VIDEO_BITRATE_MIN) {
+        bps = CORE_VIDEO_BITRATE_MIN;
+    }
+    if (bps > CORE_VIDEO_BITRATE_MAX) {
+        bps = CORE_VIDEO_BITRATE_MAX;
+    }
+    return (uint32_t)bps;
+}
+
+uint32_t core_settings_video_gop(const core_settings_t *s) {
+    uint8_t fps = s ? s->video_fps : (uint8_t)CORE_VIDEO_FPS_DEFAULT;
+    if (fps == 0) {
+        fps = (uint8_t)CORE_VIDEO_FPS_DEFAULT;
+    }
+    uint32_t gop = (uint32_t)fps * 2U;
+    if (gop < 12) {
+        gop = 12;
+    }
+    if (gop > 30) {
+        gop = 30;
+    }
+    return gop;
+}
+
 bool core_settings_load(core_settings_t *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     out->d2_post_delay_ms = CORE_D2_POST_DELAY_MS;
     core_settings_rec_pins_set_defaults(out);
+    core_settings_video_set_defaults(out);
 
     uint32_t id = 0;
     if (nvs_get_u32(s_nvs, "core_id", &id) == ESP_OK && id >= CORE_ID_MIN && id <= CORE_ID_MAX) {
@@ -90,6 +167,19 @@ bool core_settings_load(core_settings_t *out) {
         ESP_LOGW(TAG, "Pin registrazione NVS non validi (start=%u stop=%u) — ripristino default D1/D2",
                  (unsigned)start_gpio, (unsigned)stop_gpio);
     }
+
+    uint16_t vw = 0;
+    uint16_t vh = 0;
+    uint8_t vf = 0;
+    if (nvs_get_u16(s_nvs, "video_w", &vw) == ESP_OK &&
+        nvs_get_u16(s_nvs, "video_h", &vh) == ESP_OK &&
+        nvs_get_u8(s_nvs, "video_fps", &vf) == ESP_OK &&
+        core_settings_video_valid(vw, vh, vf)) {
+        out->video_width = vw;
+        out->video_height = vh;
+        out->video_fps = vf;
+    }
+    core_settings_video_normalize(out);
     return true;
 }
 
@@ -111,14 +201,23 @@ bool core_settings_save(const core_settings_t *in) {
     if (err != ESP_OK) return false;
     err = nvs_set_u8(s_nvs, "rec_gpio_stop", in->rec_gpio_stop);
     if (err != ESP_OK) return false;
+    core_settings_t video = *in;
+    core_settings_video_normalize(&video);
+    err = nvs_set_u16(s_nvs, "video_w", video.video_width);
+    if (err != ESP_OK) return false;
+    err = nvs_set_u16(s_nvs, "video_h", video.video_height);
+    if (err != ESP_OK) return false;
+    err = nvs_set_u8(s_nvs, "video_fps", video.video_fps);
+    if (err != ESP_OK) return false;
     err = nvs_commit(s_nvs);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs_commit fallito: %s", esp_err_to_name(err));
         return false;
     }
-    ESP_LOGI(TAG, "Impostazioni salvate (id=%05lu delay=%lu ms stop=GPIO%u)",
+    ESP_LOGI(TAG, "Impostazioni salvate (id=%05lu delay=%lu ms stop=GPIO%u video=%ux%u@%u)",
              (unsigned long)in->core_id, (unsigned long)in->d2_post_delay_ms,
-             (unsigned)in->rec_gpio_stop);
+             (unsigned)in->rec_gpio_stop,
+             (unsigned)video.video_width, (unsigned)video.video_height, (unsigned)video.video_fps);
     return true;
 }
 

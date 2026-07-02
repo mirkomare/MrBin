@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_video_init.h"
+#include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -42,6 +43,41 @@ bool core_video_is_ready(void) {
     return s_init && core_video_probe_device();
 }
 
+// Diagnostica: scansiona il bus SCCB (GPIO7/8) e logga chi risponde.
+// Nessun ACK = problema elettrico (cavo/alimentazione/connettore).
+// ACK a indirizzo != 0x36 = sensore diverso da OV5647 (es. SC2336 a 0x30).
+static void core_video_i2c_scan(void) {
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = I2C_NUM_0,
+        .sda_io_num = (gpio_num_t)CORE_CSI_I2C_SDA,
+        .scl_io_num = (gpio_num_t)CORE_CSI_I2C_SCL,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags = { .enable_internal_pullup = 1 },
+    };
+    i2c_master_bus_handle_t bus = nullptr;
+    if (i2c_new_master_bus(&bus_cfg, &bus) != ESP_OK) {
+        ESP_LOGW(TAG, "Scan I2C: bus non disponibile (occupato da SCCB?)");
+        return;
+    }
+    int found = 0;
+    for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
+        if (i2c_master_probe(bus, addr, 50) == ESP_OK) {
+            found++;
+            ESP_LOGW(TAG, "Scan I2C GPIO%d/%d: dispositivo trovato a 0x%02X%s",
+                     CORE_CSI_I2C_SDA, CORE_CSI_I2C_SCL, addr,
+                     addr == 0x36 ? " (OV5647 atteso)" :
+                     addr == 0x30 ? " (possibile SC2336 — driver non abilitato!)" : "");
+        }
+    }
+    if (found == 0) {
+        ESP_LOGE(TAG, "Scan I2C GPIO%d/%d: NESSUN dispositivo risponde — "
+                 "camera senza alimentazione o flat non a contatto",
+                 CORE_CSI_I2C_SDA, CORE_CSI_I2C_SCL);
+    }
+    i2c_del_master_bus(bus);
+}
+
 bool core_video_init(void) {
     if (!s_init_mtx) {
         s_init_mtx = xSemaphoreCreateMutex();
@@ -76,6 +112,7 @@ bool core_video_init(void) {
     }
     if (!ok) {
         core_video_log_heap("Init camera fallita");
+        core_video_i2c_scan();
     }
 
 out:

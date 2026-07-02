@@ -137,7 +137,9 @@ extern "C" void app_main(void) {
 
     const bool config_mode = core_gpio_is_mode_config();
 
-    core_status_led_init();
+    if (!core_status_led_init()) {
+        ESP_LOGW(TAG, "LED GPIO%d non disponibile — feedback visivo disabilitato", CORE_GPIO_STATUS_LED);
+    }
 
     if (config_mode) {
         ESP_LOGI(TAG, "MrBin CORE avvio — modalità CONFIG");

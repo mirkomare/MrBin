@@ -21,6 +21,8 @@ void core_status_led_set_mode(core_status_led_mode_t mode);
 void core_status_led_notify_sta_connected(void);
 void core_status_led_notify_d2_detected(void);
 void core_status_led_notify_rec_stop(void);   // stop D2/web: spegni subito, no ripristino RECORDING
+void core_status_led_notify_sd_ready(void);   // 1 lampeggio quando SD montata durante registrazione
+void core_status_led_end_recording(bool config_session);  // fine sessione: OFF (PIR) o ripristino AP/STA
 
 #ifdef __cplusplus
 }
